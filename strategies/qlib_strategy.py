@@ -21,62 +21,78 @@ from strategies.base_strategy import BaseStrategy, StrategyResult
 
 def _get_qlib_data_end_date() -> Optional[date]:
     """
-    检测 Qlib 数据中最新可用交易日（用 AAPL 作为代表）
-    若 Qlib 尚未 init，先自动调用 init_qlib()
+    检测 Qlib 美股数据中最新可用交易日。
+    直接读 calendars/day.txt 末尾行，不依赖 D.features 也不依赖 app_state。
+    使用 qlib_manager._find_us_data_dir() 自动定位正确的美股数据目录。
     """
-    # 先确保 Qlib 已初始化
+    from datetime import datetime as dt_cls
     try:
-        from core.app_state import get_state
-        if not get_state().qlib_initialized:
-            from data.qlib_manager import auto_init_if_data_ready
-            auto_init_if_data_ready()
+        from data.qlib_manager import _find_us_data_dir
+        data_dir = _find_us_data_dir()
     except Exception:
-        pass
+        from pathlib import Path
+        data_dir = Path.home() / ".qlib" / "qlib_data"
+
+    # 检查是否有美股 features 目录
+    features_dir = data_dir / "features"
+    if not features_dir.exists():
+        logger.debug(f"Qlib features/ 目录不存在：{features_dir}")
+        return None
+
+    us_dirs = [
+        d for d in features_dir.iterdir()
+        if d.is_dir()
+        and d.name.replace("-", "").replace(".", "").isalpha()
+        and not any(d.name.lower().startswith(pfx) for pfx in ("sh", "sz", "bj"))
+    ]
+    if not us_dirs:
+        logger.debug(f"Qlib features/ 下未发现美股代码，数据目录：{data_dir}")
+        return None
+
+    # 读取日历末尾日期
+    cal_file = data_dir / "calendars" / "day.txt"
+    if not cal_file.exists():
+        logger.debug(f"Qlib 日历文件不存在：{cal_file}")
+        return None
 
     try:
-        from qlib.data import D
-        # SunsetWolf 数据使用小写 ticker（aapl），A 股用 sh/sz 前缀
-        # 同时尝试大写和小写，兼容不同数据集格式
-        df = None
-        for ticker in ["aapl", "AAPL"]:
-            try:
-                df = D.features(
-                    [ticker], ["$close"],
-                    start_time="2018-01-01",
-                    end_time=date.today().isoformat(),
-                )
-                if df is not None and not df.empty:
-                    break
-            except Exception:
-                continue
-
-        if df is None or df.empty:
-            return None
-        # SunsetWolf 数据 Index 顺序为 (instrument, datetime)，取 "datetime" level
-        idx = df.index
-        if "datetime" in idx.names:
-            dates = idx.get_level_values("datetime")
-        elif len(idx.names) >= 2:
-            # 尝试两个 level，取看起来是日期的那个
-            dates = idx.get_level_values(1)
-        else:
-            dates = idx
-        try:
-            latest = pd.Timestamp(dates.max()).date()
-        except Exception:
-            return None
-        logger.debug(f"Qlib 数据最新日期：{latest}")
-        return latest
+        lines = cal_file.read_text().strip().splitlines()
+        for line in reversed(lines):
+            line = line.strip()
+            if line:
+                try:
+                    latest = dt_cls.strptime(line, "%Y-%m-%d").date()
+                    logger.debug(f"Qlib 美股数据最新日期：{latest}，"
+                                 f"数据目录：{data_dir}，{len(us_dirs)} 支美股")
+                    return latest
+                except ValueError:
+                    continue
     except Exception as e:
-        logger.debug(f"Qlib 数据日期检测失败：{e}")
-        return None
+        logger.debug(f"Qlib 日历文件读取失败：{e}")
+
+    return None
 
 
 def _qlib_init_check():
-    """确认 Qlib 已初始化，否则抛出异常"""
-    from core.app_state import get_state
-    if not get_state().qlib_initialized:
-        raise RuntimeError("Qlib 尚未初始化，请先在「参数配置」页下载数据")
+    """
+    确认 Qlib 已初始化，否则自动尝试初始化。
+    Worker 线程中 app_state 可能为 False，因此先尝试 init 再检查。
+    """
+    try:
+        from core.app_state import get_state
+        if get_state().qlib_initialized:
+            return
+    except Exception:
+        pass
+    # 尝试自动初始化
+    try:
+        from data.qlib_manager import init_qlib
+        ok = init_qlib()
+        if ok:
+            return
+    except Exception as e:
+        pass
+    raise RuntimeError("Qlib 尚未初始化，请先在「参数配置」页下载数据")
 
 
 def _build_dataset(universe: list[str], handler_class_name: str = "Alpha158",
@@ -121,7 +137,6 @@ def _build_dataset(universe: list[str], handler_class_name: str = "Alpha158",
         end_time=pred_end,
         fit_start_time=train_start,
         fit_end_time=train_end,
-        infer_processors=[],
     )
     dataset = DatasetH(
         handler=handler,
@@ -464,7 +479,7 @@ class DeepLearningStrategy(BaseStrategy):
         def model_factory():
             from qlib.contrib.model.pytorch_lstm import LSTM
             return LSTM(
-                d_feat=6,
+                d_feat=158,       # Alpha158 输出 158 个特征
                 hidden_size=64,
                 num_layers=2,
                 dropout=0.0,
@@ -496,7 +511,7 @@ class IntradayProfitStrategy(BaseStrategy):
         def model_factory():
             from qlib.contrib.model.pytorch_gru import GRU
             return GRU(
-                d_feat=6,
+                d_feat=158,       # Alpha158 输出 158 个特征
                 hidden_size=64,
                 num_layers=2,
                 dropout=0.0,
@@ -517,7 +532,7 @@ class IntradayProfitStrategy(BaseStrategy):
 
 class PyTorchFullMarketStrategy(BaseStrategy):
     """
-    全市场深度学习：PyTorch MLP + Alpha360
+    全市场深度学习：PyTorch LSTM + Alpha360
     覆盖 NYSE+NASDAQ 全市场（5000+ 股票）
     """
     KEY  = "pytorch_full_market"
@@ -530,7 +545,7 @@ class PyTorchFullMarketStrategy(BaseStrategy):
         def model_factory():
             from qlib.contrib.model.pytorch_lstm import LSTM
             return LSTM(
-                d_feat=6,
+                d_feat=360,       # Alpha360 输出 360 个特征
                 hidden_size=128,
                 num_layers=1,
                 dropout=0.0,

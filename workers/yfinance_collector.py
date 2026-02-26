@@ -20,7 +20,25 @@ from PyQt6.QtCore import QObject, QRunnable, pyqtSignal, pyqtSlot
 from loguru import logger
 
 
-QLIB_DATA_DIR = Path.home() / ".qlib" / "qlib_data" / "us_data"
+def _find_us_data_dir() -> Path:
+    """自动探测美股 Qlib 数据目录（与 qlib_manager 保持一致）"""
+    candidates = [
+        Path.home() / ".qlib" / "qlib_data",
+        Path.home() / ".qlib" / "qlib_data" / "us_data",
+    ]
+    for path in candidates:
+        features = path / "features"
+        if not features.exists():
+            continue
+        for d in features.iterdir():
+            if (d.is_dir()
+                    and d.name.replace("-", "").replace(".", "").isalpha()
+                    and not any(d.name.lower().startswith(p) for p in ("sh", "sz", "bj"))):
+                return path
+    return candidates[0]
+
+
+QLIB_DATA_DIR = _find_us_data_dir()
 # yfinance 下载每批的股票数量（过大会超时）
 BATCH_SIZE = 50
 # 获取交易日历用的参考指数

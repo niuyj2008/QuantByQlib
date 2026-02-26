@@ -14,7 +14,32 @@ from typing import Optional
 from loguru import logger
 
 
-QLIB_DATA_DIR = Path.home() / ".qlib" / "qlib_data" / "us_data"
+def _find_us_data_dir() -> Path:
+    """
+    自动探测美股 Qlib 数据目录。
+    优先顺序：
+      1. ~/.qlib/qlib_data/              （SunsetWolf 原始下载位置）
+      2. ~/.qlib/qlib_data/us_data/      （旧配置路径）
+    判断依据：features/ 下有纯字母子目录（如 aapl）且不含 sh/sz/bj 前缀
+    """
+    candidates = [
+        Path.home() / ".qlib" / "qlib_data",
+        Path.home() / ".qlib" / "qlib_data" / "us_data",
+    ]
+    for path in candidates:
+        features = path / "features"
+        if not features.exists():
+            continue
+        for d in features.iterdir():
+            if (d.is_dir()
+                    and d.name.replace("-", "").replace(".", "").isalpha()
+                    and not any(d.name.lower().startswith(p) for p in ("sh", "sz", "bj"))):
+                return path
+    # 默认返回根目录（即使暂时为空）
+    return candidates[0]
+
+
+QLIB_DATA_DIR = _find_us_data_dir()
 
 
 def is_initialized() -> bool:

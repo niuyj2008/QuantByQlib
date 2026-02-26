@@ -103,20 +103,37 @@ class StockScreener:
         return tickers
 
     def _from_qlib(self) -> list[str]:
-        """从 Qlib 数据中提取有效股票（有 features/ 数据的）"""
+        """
+        从 Qlib 美股数据 features/ 目录直接枚举有效股票。
+        避免使用 D.instruments(market='all')，因为该 API 在 A 股数据集下会返回 A 股编码。
+        """
         try:
-            from qlib.data import D
-            from qlib.config import C
+            from data.qlib_manager import _find_us_data_dir
+            data_dir = _find_us_data_dir()
+        except Exception:
+            from pathlib import Path
+            data_dir = Path.home() / ".qlib" / "qlib_data"
 
-            instruments = D.instruments(market="all")
-            df = D.list_instruments(instruments, start_time="-30d", end_time="today",
-                                    as_list=True)
-            tickers = [str(t).upper() for t in df if t]
-            logger.info(f"Qlib 宇宙：{len(tickers)} 支股票")
-            return tickers[:2000]   # 限制防止 OOM（全市场可能 5000+）
-        except Exception as e:
-            logger.debug(f"Qlib 宇宙获取失败：{e}")
+        features_dir = data_dir / "features"
+        if not features_dir.exists():
+            logger.debug(f"features/ 目录不存在：{features_dir}")
             return []
+
+        tickers = []
+        for d in features_dir.iterdir():
+            if not d.is_dir():
+                continue
+            name = d.name
+            # 过滤 A 股（sh/sz/bj 前缀）和指数（^ 前缀）
+            if any(name.lower().startswith(pfx) for pfx in ("sh", "sz", "bj", "^", "_")):
+                continue
+            # 纯字母 + 数字 + 连字符（美股 ticker 格式）
+            if name.replace("-", "").replace(".", "").isalnum():
+                tickers.append(name.upper())
+
+        tickers = sorted(set(tickers))
+        logger.info(f"Qlib 美股宇宙：{len(tickers)} 支股票（来自 {data_dir}）")
+        return tickers[:2000]  # 限制防止 OOM
 
     def _sp500_fallback(self) -> list[str]:
         """内置精简宇宙（约 100 支大盘股），仅作备用"""
