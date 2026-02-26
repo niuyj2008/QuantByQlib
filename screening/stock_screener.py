@@ -102,10 +102,38 @@ class StockScreener:
         self._universe_cache = tickers
         return tickers
 
+    # 精选大盘股（S&P500 核心成分 + 纳斯达克100主力），
+    # 在 Qlib 数据集中均有完整历史，适合 Alpha158 因子计算
+    _CORE_UNIVERSE = [
+        "AAPL","MSFT","NVDA","AMZN","GOOGL","GOOG","META","TSLA","BRK-B","UNH",
+        "JPM","V","XOM","LLY","JNJ","MA","AVGO","PG","HD","MRK","COST","ABBV",
+        "CVX","KO","PEP","WMT","ACN","MCD","BAC","CRM","ORCL","ADBE","AMD","NFLX",
+        "QCOM","TXN","INTU","AMGN","CSCO","NOW","INTC","IBM","GS","CAT","HON",
+        "RTX","LOW","GE","SPGI","BKNG","ISRG","ELV","AXP","CB","SYK","PLD","BLK",
+        "VRTX","C","DE","REGN","ADI","LRCX","KLAC","MRVL","MU","PANW","SNPS","CDNS",
+        "ANET","FTNT","CRWD","ZS","DDOG","TEAM","WDAY","VEEV","HUBS","COUP","ZM",
+        "SHOP","SQ","PYPL","COIN","HOOD","PLTR","RBLX","U","DASH","LYFT","UBER",
+        "ABNB","AIRB","BMRN","BIIB","GILD","MRNA","BNTX","PFE","AZN","LMT","NOC",
+        "GD","BA","HII","L3HARRIS","LDOS","BAH","SAIC","MANT","CACI","MAXR",
+        "WFC","MS","USB","PNC","TFC","COF","AIG","MET","PRU","AFL","ALL","TRV",
+        "SPG","O","AMT","CCI","DLR","PSA","WELL","EQR","AVB","PLD","VTR","HR",
+        "VZ","T","TMUS","CMCSA","DIS","NFLX","PARA","WBD","FOX","NWS",
+        "XOM","CVX","COP","SLB","HAL","BKR","DVN","MPC","VLO","PSX","OXY",
+        "NEE","DUK","SO","D","AEP","EXC","XEL","ED","PEG","AWK",
+        "LIN","APD","ECL","SHW","PPG","NEM","FCX","AA","CLF","NUE","STLD",
+        "UPS","FDX","DAL","UAL","AAL","LUV","CSX","NSC","UNP","WAB",
+        "CVS","WBA","MCK","CAH","ABC","HCA","THC","CNC","MOH","HUM",
+        "WMT","TGT","COST","HD","LOW","BBY","ROST","TJX","DG","DLTR",
+        "SBUX","MCD","YUM","CMG","DPZ","QSR","DKNG","PENN",
+        "BA","CAT","DE","HON","GE","MMM","EMR","ROK","PH","ETN","IR","XYL",
+        "TSCO","SYF","WEX","CSGP","COIN","FIS","FISV","GPN","MA","V","AXP",
+    ]
+
     def _from_qlib(self) -> list[str]:
         """
-        从 Qlib 美股数据 features/ 目录直接枚举有效股票。
-        避免使用 D.instruments(market='all')，因为该 API 在 A 股数据集下会返回 A 股编码。
+        从 Qlib 美股数据 features/ 目录枚举有效股票，
+        优先返回有完整历史数据的核心大盘股（适合 Alpha158 ML 训练），
+        再补充其他有效股票，过滤退市/数据稀少的股票。
         """
         try:
             from data.qlib_manager import _find_us_data_dir
@@ -119,21 +147,37 @@ class StockScreener:
             logger.debug(f"features/ 目录不存在：{features_dir}")
             return []
 
-        tickers = []
+        # 检查哪些核心大盘股在 Qlib 数据中存在且有效
+        core_valid = []
+        for ticker in self._CORE_UNIVERSE:
+            ticker_dir = features_dir / ticker.lower()
+            close_bin = ticker_dir / "close.day.bin"
+            if close_bin.exists() and close_bin.stat().st_size > 4004:
+                core_valid.append(ticker)
+
+        # 再枚举其余有效股票作为补充
+        core_set = {t.lower() for t in core_valid}
+        extra = []
         for d in features_dir.iterdir():
             if not d.is_dir():
                 continue
             name = d.name
-            # 过滤 A 股（sh/sz/bj 前缀）和指数（^ 前缀）
+            if name in core_set:
+                continue
             if any(name.lower().startswith(pfx) for pfx in ("sh", "sz", "bj", "^", "_")):
                 continue
-            # 纯字母 + 数字 + 连字符（美股 ticker 格式）
-            if name.replace("-", "").replace(".", "").isalnum():
-                tickers.append(name.upper())
+            if not name.replace("-", "").replace(".", "").isalnum():
+                continue
+            close_bin = d / "close.day.bin"
+            if not close_bin.exists() or close_bin.stat().st_size < 4004:
+                continue
+            extra.append(name.upper())
 
-        tickers = sorted(set(tickers))
-        logger.info(f"Qlib 美股宇宙：{len(tickers)} 支股票（来自 {data_dir}）")
-        return tickers[:2000]  # 限制防止 OOM
+        tickers = core_valid + sorted(extra)
+        logger.info(
+            f"Qlib 美股宇宙：{len(tickers)} 支（核心大盘股 {len(core_valid)} 支优先，来自 {data_dir}）"
+        )
+        return tickers[:2000]
 
     def _sp500_fallback(self) -> list[str]:
         """内置精简宇宙（约 100 支大盘股），仅作备用"""

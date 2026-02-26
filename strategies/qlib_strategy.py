@@ -100,8 +100,15 @@ def _build_dataset(universe: list[str], handler_class_name: str = "Alpha158",
     """
     构建 Qlib DatasetH（训练 + 预测数据集）
     自动以 Qlib 数据实际最新日期为锚点，而非今天
-    train_days: 训练窗口（约 2 年交易日）
-    pred_days:  预测窗口（最近 20 个交易日用于推断）
+
+    日期段布局（从早到晚，不重叠）：
+      train_start ─── train_end ─── valid_end ─── pred_end(=anchor)
+                       │                │
+                       └── valid ────── ┘
+                                        └── test ── pred_end
+
+    train_days: 训练窗口交易日数（约 2 年）
+    pred_days:  验证+测试总窗口（各占一半）
     """
     from qlib.data.dataset import DatasetH
 
@@ -110,16 +117,31 @@ def _build_dataset(universe: list[str], handler_class_name: str = "Alpha158",
     if data_end is None:
         raise RuntimeError("无法获取 Qlib 数据日期范围，数据可能为空")
 
-    anchor      = data_end
-    train_start = (anchor - timedelta(days=int(train_days * 1.5))).isoformat()
-    train_end   = (anchor - timedelta(days=pred_days + 5)).isoformat()
-    pred_start  = (anchor - timedelta(days=pred_days * 2)).isoformat()
-    pred_end    = anchor.isoformat()
+    anchor = data_end
+
+    # 日期段：确保 train < valid < test，且时间递增
+    # 以交易日数估算，1 交易日 ≈ 1.5 自然日
+    valid_days = max(pred_days, 20)       # 验证集：至少 20 个交易日
+    test_days  = max(pred_days, 10)       # 测试集：至少 10 个交易日
+
+    pred_end    = anchor
+    test_start  = anchor - timedelta(days=int(test_days * 1.5))
+    valid_start = test_start - timedelta(days=int(valid_days * 1.5))
+    train_end   = valid_start
+    train_start = valid_start - timedelta(days=int(train_days * 1.5))
+
+    # 转为字符串
+    train_start_s = train_start.isoformat()
+    train_end_s   = train_end.isoformat()
+    valid_start_s = valid_start.isoformat()
+    test_start_s  = test_start.isoformat()
+    pred_end_s    = pred_end.isoformat()
 
     logger.info(
         f"DatasetH 日期锚点：data_end={anchor}  "
-        f"train=[{train_start} → {train_end}]  "
-        f"test=[{pred_start} → {pred_end}]"
+        f"train=[{train_start_s} → {train_end_s}]  "
+        f"valid=[{valid_start_s} → {test_start_s}]  "
+        f"test=[{test_start_s} → {pred_end_s}]"
     )
 
     # 动态导入 Alpha158 或 Alpha360
@@ -133,17 +155,17 @@ def _build_dataset(universe: list[str], handler_class_name: str = "Alpha158",
 
     handler = HandlerClass(
         instruments=universe_qlib,
-        start_time=train_start,
-        end_time=pred_end,
-        fit_start_time=train_start,
-        fit_end_time=train_end,
+        start_time=train_start_s,
+        end_time=pred_end_s,
+        fit_start_time=train_start_s,
+        fit_end_time=train_end_s,
     )
     dataset = DatasetH(
         handler=handler,
         segments={
-            "train": (train_start, train_end),
-            "valid": (train_end, pred_start),
-            "test":  (pred_start, pred_end),
+            "train": (train_start_s, train_end_s),
+            "valid": (valid_start_s, test_start_s),
+            "test":  (test_start_s,  pred_end_s),
         },
     )
     return dataset
@@ -304,6 +326,81 @@ def _yfinance_score_universe(
     )
 
 
+def _patch_pytorch_model_best_param(model) -> None:
+    """
+    修复 Qlib 0.9.7 LSTM/GRU fit() 中 best_param 未赋值的 bug。
+    当第一个 epoch val_score 为 nan（NaN loss）时，
+    if val_score > best_score 条件为 False，best_param 永远不被赋值，
+    导致 fit 结束时 load_state_dict(best_param) 抛 UnboundLocalError。
+    通过 monkey-patch fit() 在训练前先初始化 best_param 解决。
+    """
+    import copy, types, numpy as np_
+    import torch
+
+    original_fit = model.fit.__func__ if hasattr(model.fit, '__func__') else None
+    if original_fit is None:
+        return  # 无法 patch，跳过
+
+    def patched_fit(self, dataset, evals_result=dict(), save_path=None):
+        from qlib.data.dataset.handler import DataHandlerLP
+        from qlib.utils import get_or_create_path
+
+        df_train, df_valid, df_test = dataset.prepare(
+            ["train", "valid", "test"],
+            col_set=["feature", "label"],
+            data_key=DataHandlerLP.DK_L,
+        )
+        if df_train.empty or df_valid.empty:
+            raise ValueError("Empty data from dataset, please check your dataset config.")
+
+        x_train, y_train = df_train["feature"], df_train["label"]
+        x_valid, y_valid = df_valid["feature"], df_valid["label"]
+
+        save_path = get_or_create_path(save_path)
+        stop_steps = 0
+        best_score = -np_.inf
+        best_epoch = 0
+        evals_result["train"] = []
+        evals_result["valid"] = []
+
+        self.fitted = True
+        # ★ 预先初始化 best_param，避免第一个 epoch val_score=nan 时未赋值
+        best_param = copy.deepcopy(self.lstm_model.state_dict()
+                                   if hasattr(self, 'lstm_model')
+                                   else self.gru_model.state_dict())
+
+        for step in range(self.n_epochs):
+            self.train_epoch(x_train, y_train)
+            train_loss, train_score = self.test_epoch(x_train, y_train)
+            val_loss, val_score = self.test_epoch(x_valid, y_valid)
+            self.logger.info("train %.6f, valid %.6f" % (train_score, val_score))
+            evals_result["train"].append(train_score)
+            evals_result["valid"].append(val_score)
+
+            # 用 nan-safe 比较
+            if np_.isfinite(val_score) and val_score > best_score:
+                best_score = val_score
+                stop_steps = 0
+                best_epoch = step
+                best_param = copy.deepcopy(self.lstm_model.state_dict()
+                                           if hasattr(self, 'lstm_model')
+                                           else self.gru_model.state_dict())
+            else:
+                stop_steps += 1
+                if stop_steps >= self.early_stop:
+                    self.logger.info("early stop")
+                    break
+
+        self.logger.info("best score: %.6lf @ %d" % (best_score, best_epoch))
+        if hasattr(self, 'lstm_model'):
+            self.lstm_model.load_state_dict(best_param)
+        else:
+            self.gru_model.load_state_dict(best_param)
+        torch.save(best_param, save_path)
+
+    model.fit = types.MethodType(patched_fit, model)
+
+
 def _run_with_qlib_or_fallback(
     strategy_key: str,
     strategy_name: str,
@@ -363,6 +460,8 @@ def _run_with_qlib_or_fallback(
         )
         cb(30, "训练模型...")
         model = model_factory()
+        # 应用 Qlib 0.9.7 best_param bug 修复
+        _patch_pytorch_model_best_param(model)
         model.fit(dataset)
         cb(75, "生成预测分数...")
         pred = model.predict(dataset, segment="test")
@@ -472,9 +571,18 @@ class DeepLearningStrategy(BaseStrategy):
     KEY  = "deep_learning"
     NAME = "深度学习集成"
     TOPK = 50
+    # LSTM 对内存敏感，限制宇宙规模防止 OOM 崩溃
+    MAX_UNIVERSE = 300
 
     def run(self, universe: list[str], progress_cb=None) -> StrategyResult:
         _qlib_init_check()
+
+        # 限制 universe 大小，优先保留靠前的（经过字典序排序的蓝筹股）
+        if len(universe) > self.MAX_UNIVERSE:
+            logger.info(
+                f"[{self.KEY}] universe {len(universe)} 支 → 截断至 {self.MAX_UNIVERSE} 支（防 OOM）"
+            )
+            universe = universe[: self.MAX_UNIVERSE]
 
         def model_factory():
             from qlib.contrib.model.pytorch_lstm import LSTM
@@ -483,12 +591,12 @@ class DeepLearningStrategy(BaseStrategy):
                 hidden_size=64,
                 num_layers=2,
                 dropout=0.0,
-                n_epochs=20,
+                n_epochs=10,      # 降低 epoch 数，避免训练时间过长导致假死
                 lr=1e-3,
-                early_stop=5,
-                batch_size=800,
-                metric="IC",
-                GPU=0,
+                early_stop=10,    # 须 >= n_epochs，避免 Qlib 0.9.7 best_param 未赋值 bug
+                batch_size=512,   # 降低 batch_size 减少显存/内存峰值
+                metric="",        # Qlib 0.9.7 LSTM 只支持 "" 或 "loss"
+                GPU=-1,           # 强制 CPU，避免 MPS/CUDA 兼容性问题
             )
 
         return _run_with_qlib_or_fallback(
@@ -504,9 +612,16 @@ class IntradayProfitStrategy(BaseStrategy):
     KEY  = "intraday_profit"
     NAME = "短线获利"
     TOPK = 30
+    MAX_UNIVERSE = 300
 
     def run(self, universe: list[str], progress_cb=None) -> StrategyResult:
         _qlib_init_check()
+
+        if len(universe) > self.MAX_UNIVERSE:
+            logger.info(
+                f"[{self.KEY}] universe {len(universe)} 支 → 截断至 {self.MAX_UNIVERSE} 支（防 OOM）"
+            )
+            universe = universe[: self.MAX_UNIVERSE]
 
         def model_factory():
             from qlib.contrib.model.pytorch_gru import GRU
@@ -515,12 +630,12 @@ class IntradayProfitStrategy(BaseStrategy):
                 hidden_size=64,
                 num_layers=2,
                 dropout=0.0,
-                n_epochs=15,
+                n_epochs=10,
                 lr=1e-3,
-                early_stop=5,
-                batch_size=800,
-                metric="IC",
-                GPU=0,
+                early_stop=10,    # >= n_epochs，避免 best_param 未赋值 bug
+                batch_size=512,
+                metric="",        # Qlib 0.9.7 GRU 只支持 "" 或 "loss"
+                GPU=-1,           # 强制 CPU
             )
 
         return _run_with_qlib_or_fallback(
@@ -538,9 +653,16 @@ class PyTorchFullMarketStrategy(BaseStrategy):
     KEY  = "pytorch_full_market"
     NAME = "全市场深度学习"
     TOPK = 50
+    MAX_UNIVERSE = 400   # Alpha360 特征更多，内存开销更大，适当限制
 
     def run(self, universe: list[str], progress_cb=None) -> StrategyResult:
         _qlib_init_check()
+
+        if len(universe) > self.MAX_UNIVERSE:
+            logger.info(
+                f"[{self.KEY}] universe {len(universe)} 支 → 截断至 {self.MAX_UNIVERSE} 支（防 OOM）"
+            )
+            universe = universe[: self.MAX_UNIVERSE]
 
         def model_factory():
             from qlib.contrib.model.pytorch_lstm import LSTM
@@ -549,12 +671,12 @@ class PyTorchFullMarketStrategy(BaseStrategy):
                 hidden_size=128,
                 num_layers=1,
                 dropout=0.0,
-                n_epochs=10,
+                n_epochs=8,
                 lr=1e-3,
-                early_stop=3,
-                batch_size=2000,
-                metric="IC",
-                GPU=0,
+                early_stop=8,     # >= n_epochs，避免 best_param 未赋值 bug
+                batch_size=512,   # 降低 batch_size
+                metric="",        # Qlib 0.9.7 只支持 "" 或 "loss"
+                GPU=-1,           # 强制 CPU
             )
 
         return _run_with_qlib_or_fallback(
