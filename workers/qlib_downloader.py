@@ -147,12 +147,19 @@ class QlibDownloadWorker(QRunnable):
 
     def _download_sunsetwolf_us_data(self) -> None:
         """
-        下载 SunsetWolf/qlib_dataset 美股 Qlib 数据集并解压
-        URL: https://github.com/SunsetWolf/qlib_dataset/releases/download/v2/qlib_data_us_1d_latest.zip
+        下载 SunsetWolf/qlib_dataset 美股 Qlib 数据集并解压。
+        目标目录始终为 ~/.qlib/qlib_data/（即 FIXED_TARGET_DIR）。
+        zip 内层目录（如 qlib_data_us_1d_latest/）会被重命名为目标目录。
         """
         import tempfile
         import shutil
-        from data.qlib_manager import QLIB_DATA_DIR, init_qlib
+        from pathlib import Path
+        from data.qlib_manager import init_qlib
+
+        # 固定目标目录：始终是 ~/.qlib/qlib_data/，不依赖动态的 QLIB_DATA_DIR
+        FIXED_TARGET_DIR = Path.home() / ".qlib" / "qlib_data"
+        FIXED_PARENT_DIR = FIXED_TARGET_DIR.parent    # ~/.qlib/
+        FIXED_TARGET_DIR.mkdir(parents=True, exist_ok=True)
 
         url = SUNSETWOLF_US_DATA_URL
         self.signals.log_line.emit(f"[INFO] 下载地址：{url}")
@@ -205,12 +212,12 @@ class QlibDownloadWorker(QRunnable):
             self.signals.log_line.emit("[INFO] 下载完成，正在解压...")
             self.signals.progress.emit(78, "正在解压数据包（约 2-3 分钟）...")
 
-            parent_dir = QLIB_DATA_DIR.parent  # ~/.qlib/qlib_data/
-            parent_dir.mkdir(parents=True, exist_ok=True)
+            # 解压到临时子目录，避免直接污染目标目录
+            extract_tmp = Path(tmpdir) / "extracted"
+            extract_tmp.mkdir()
 
-            # 使用 unzip 解压（zip 格式）
-            cmd_extract = ["unzip", "-o", zip_path, "-d", str(parent_dir)]
-            self.signals.log_line.emit(f"[CMD] unzip ... -d {parent_dir}")
+            cmd_extract = ["unzip", "-o", zip_path, "-d", str(extract_tmp)]
+            self.signals.log_line.emit(f"[CMD] unzip ... -d {extract_tmp}")
 
             try:
                 proc = subprocess.Popen(
@@ -234,7 +241,7 @@ class QlibDownloadWorker(QRunnable):
                     self.signals.log_line.emit(f"[WARN] unzip 退出码 {proc.returncode}，尝试 Python zipfile...")
                     import zipfile
                     with zipfile.ZipFile(zip_path, "r") as zf:
-                        zf.extractall(str(parent_dir))
+                        zf.extractall(str(extract_tmp))
             except FileNotFoundError:
                 self.signals.log_line.emit("[INFO] unzip 不可用，使用 Python zipfile 解压...")
                 try:
@@ -245,7 +252,7 @@ class QlibDownloadWorker(QRunnable):
                             if self._cancelled:
                                 self.signals.completed.emit(False, "用户取消")
                                 return
-                            zf.extract(name, str(parent_dir))
+                            zf.extract(name, str(extract_tmp))
                             if i % 500 == 0:
                                 pct = 78 + int(i / total_files * 15)
                                 self.signals.progress.emit(pct, f"解压中... {i}/{total_files}")
@@ -258,59 +265,41 @@ class QlibDownloadWorker(QRunnable):
 
             self.signals.progress.emit(93, "检查解压结果...")
 
-            # SunsetWolf zip 有两种解压结构：
-            # 情况A：直接散落在 parent_dir/ 下（features/ calendars/ instruments/）
-            # 情况B：解压到子目录（qlib_data_us_1d_latest/ 等）
+            # 找到解压后含 features/ 的子目录（zip 内层目录名不固定）
             US_DATA_ITEMS = ["features", "calendars", "instruments"]
-
-            # 先检查情况B：子目录
             extracted_dir = None
-            for candidate_name in ["qlib_data_us_1d_latest", "qlib_data_us", "us_data_new"]:
-                candidate = parent_dir / candidate_name
-                if candidate.exists() and candidate.is_dir() and (candidate / "features").exists():
-                    extracted_dir = candidate
-                    break
 
-            if extracted_dir is None:
-                # 扫描含 features/ 的其他子目录
-                for sub in parent_dir.iterdir():
-                    if sub.is_dir() and sub.name != "us_data" and (sub / "features").exists():
+            # 先看 extract_tmp 下有无直接的 features/（zip 无子目录结构）
+            if (extract_tmp / "features").exists():
+                extracted_dir = extract_tmp
+            else:
+                # zip 内有子目录，找第一个含 features/ 的
+                for sub in extract_tmp.iterdir():
+                    if sub.is_dir() and (sub / "features").exists():
                         extracted_dir = sub
+                        self.signals.log_line.emit(f"[INFO] 找到解压目录：{sub.name}")
                         break
 
-            if extracted_dir is not None:
-                # 情况B：整个子目录重命名为 us_data
-                self.signals.log_line.emit(f"[INFO] 找到解压目录：{extracted_dir.name}")
-                if QLIB_DATA_DIR.exists():
-                    backup = QLIB_DATA_DIR.with_name("us_data_backup")
-                    if backup.exists():
-                        shutil.rmtree(backup, ignore_errors=True)
-                    QLIB_DATA_DIR.rename(backup)
-                    self.signals.log_line.emit(f"[INFO] 旧数据已备份到 {backup}")
-                extracted_dir.rename(QLIB_DATA_DIR)
-                self.signals.log_line.emit(f"[INFO] 已将 {extracted_dir.name}/ 重命名为 us_data/")
+            if extracted_dir is None:
+                dirs = [p.name for p in extract_tmp.iterdir() if p.is_dir()]
+                self.signals.log_line.emit(f"[WARN] 未找到含 features/ 的目录，当前：{dirs}")
+                self.signals.completed.emit(False, "解压结构异常，未找到 features/ 目录")
+                return
 
-            elif (parent_dir / "features").exists():
-                # 情况A：数据散落在 parent_dir/ 根目录，移入 us_data/
-                self.signals.log_line.emit("[INFO] 数据散落在根目录，正在移入 us_data/...")
-                if QLIB_DATA_DIR.exists():
-                    backup = QLIB_DATA_DIR.with_name("us_data_backup")
+            # 备份旧数据，将新数据的各子目录移入 FIXED_TARGET_DIR
+            self.signals.log_line.emit(f"[INFO] 正在将数据写入 {FIXED_TARGET_DIR}...")
+            for item_name in US_DATA_ITEMS:
+                src = extracted_dir / item_name
+                dst = FIXED_TARGET_DIR / item_name
+                if not src.exists():
+                    continue
+                if dst.exists():
+                    backup = FIXED_TARGET_DIR / f"{item_name}_backup"
                     if backup.exists():
                         shutil.rmtree(backup, ignore_errors=True)
-                    QLIB_DATA_DIR.rename(backup)
-                    self.signals.log_line.emit(f"[INFO] 旧数据已备份到 {backup}")
-                QLIB_DATA_DIR.mkdir(parents=True, exist_ok=True)
-                for item_name in US_DATA_ITEMS:
-                    src = parent_dir / item_name
-                    dst = QLIB_DATA_DIR / item_name
-                    if src.exists():
-                        src.rename(dst)
-                        self.signals.log_line.emit(f"[INFO] 已移动 {item_name}/ → us_data/{item_name}/")
-            else:
-                features = QLIB_DATA_DIR / "features"
-                if not features.exists():
-                    dirs = [p.name for p in parent_dir.iterdir() if p.is_dir()]
-                    self.signals.log_line.emit(f"[WARN] 未找到 features/ 目录，当前子目录：{dirs}")
+                    dst.rename(backup)
+                shutil.move(str(src), str(dst))
+                self.signals.log_line.emit(f"[INFO] 已更新 {item_name}/")
 
         self.signals.progress.emit(96, "重新初始化 Qlib...")
         self.signals.log_line.emit("[INFO] 正在重新初始化 Qlib...")
@@ -378,7 +367,12 @@ class QlibUpdateWorker(QRunnable):
     def _run_update(self) -> None:
         import tempfile
         import shutil
-        from data.qlib_manager import QLIB_DATA_DIR, init_qlib
+        from pathlib import Path
+        from data.qlib_manager import init_qlib
+
+        # 固定目标目录：始终是 ~/.qlib/qlib_data/
+        FIXED_TARGET_DIR = Path.home() / ".qlib" / "qlib_data"
+        FIXED_TARGET_DIR.mkdir(parents=True, exist_ok=True)
 
         url = SUNSETWOLF_US_DATA_URL
         self.signals.log_line.emit(f"[INFO] 下载 SunsetWolf 美股 Qlib 数据集...")
@@ -432,11 +426,11 @@ class QlibUpdateWorker(QRunnable):
             self.signals.log_line.emit("[INFO] 下载完成，正在解压...")
             self.signals.progress.emit(78, "正在解压数据包（约 2-3 分钟）...")
 
-            parent_dir = QLIB_DATA_DIR.parent  # ~/.qlib/qlib_data/
-            parent_dir.mkdir(parents=True, exist_ok=True)
-
-            cmd_extract = ["unzip", "-o", zip_path, "-d", str(parent_dir)]
-            self.signals.log_line.emit(f"[CMD] unzip ... -d {parent_dir}")
+            # 解压到临时子目录
+            extract_tmp = Path(tmpdir) / "extracted"
+            extract_tmp.mkdir()
+            cmd_extract = ["unzip", "-o", zip_path, "-d", str(extract_tmp)]
+            self.signals.log_line.emit(f"[CMD] unzip ... -d {extract_tmp}")
 
             try:
                 self._proc = subprocess.Popen(
@@ -460,7 +454,7 @@ class QlibUpdateWorker(QRunnable):
                     self.signals.log_line.emit(f"[WARN] unzip 退出码 {self._proc.returncode}，尝试 Python zipfile...")
                     import zipfile
                     with zipfile.ZipFile(zip_path, "r") as zf:
-                        zf.extractall(str(parent_dir))
+                        zf.extractall(str(extract_tmp))
             except FileNotFoundError:
                 self.signals.log_line.emit("[INFO] unzip 不可用，使用 Python zipfile 解压...")
                 try:
@@ -471,7 +465,7 @@ class QlibUpdateWorker(QRunnable):
                             if self._cancelled:
                                 self.signals.completed.emit(False, "用户取消")
                                 return
-                            zf.extract(name, str(parent_dir))
+                            zf.extract(name, str(extract_tmp))
                             if i % 500 == 0:
                                 pct = 78 + int(i / total_files * 15)
                                 self.signals.progress.emit(pct, f"解压中... {i}/{total_files}")
@@ -485,57 +479,38 @@ class QlibUpdateWorker(QRunnable):
             self.signals.progress.emit(93, "检查解压结果...")
             self.signals.log_line.emit("[INFO] 解压完成，检查目录结构...")
 
-            # SunsetWolf zip 有两种解压结构：
-            # 情况A：直接散落在 parent_dir/ 下（features/ calendars/ instruments/）
-            # 情况B：解压到子目录（qlib_data_us_1d_latest/ 等）
             US_DATA_ITEMS = ["features", "calendars", "instruments"]
-
             extracted_dir = None
-            for candidate_name in ["qlib_data_us_1d_latest", "qlib_data_us", "us_data_new"]:
-                candidate = parent_dir / candidate_name
-                if candidate.exists() and candidate.is_dir() and (candidate / "features").exists():
-                    extracted_dir = candidate
-                    break
 
-            if extracted_dir is None:
-                for sub in parent_dir.iterdir():
-                    if sub.is_dir() and sub.name != "us_data" and (sub / "features").exists():
+            if (extract_tmp / "features").exists():
+                extracted_dir = extract_tmp
+            else:
+                for sub in extract_tmp.iterdir():
+                    if sub.is_dir() and (sub / "features").exists():
                         extracted_dir = sub
+                        self.signals.log_line.emit(f"[INFO] 找到解压目录：{sub.name}")
                         break
 
-            if extracted_dir is not None:
-                # 情况B：整个子目录重命名为 us_data
-                self.signals.log_line.emit(f"[INFO] 找到解压目录：{extracted_dir.name}")
-                if QLIB_DATA_DIR.exists():
-                    backup = QLIB_DATA_DIR.with_name("us_data_backup")
-                    if backup.exists():
-                        shutil.rmtree(backup, ignore_errors=True)
-                    QLIB_DATA_DIR.rename(backup)
-                    self.signals.log_line.emit(f"[INFO] 旧数据已备份到 {backup}")
-                extracted_dir.rename(QLIB_DATA_DIR)
-                self.signals.log_line.emit(f"[INFO] 已将 {extracted_dir.name}/ 重命名为 us_data/")
+            if extracted_dir is None:
+                dirs = [p.name for p in extract_tmp.iterdir() if p.is_dir()]
+                self.signals.log_line.emit(f"[WARN] 未找到含 features/ 的目录，当前：{dirs}")
+                self.signals.completed.emit(False, "解压结构异常，未找到 features/ 目录")
+                return
 
-            elif (parent_dir / "features").exists():
-                # 情况A：数据散落在 parent_dir/ 根目录，移入 us_data/
-                self.signals.log_line.emit("[INFO] 数据散落在根目录，正在移入 us_data/...")
-                if QLIB_DATA_DIR.exists():
-                    backup = QLIB_DATA_DIR.with_name("us_data_backup")
+            # 将各子目录移入 FIXED_TARGET_DIR
+            self.signals.log_line.emit(f"[INFO] 正在将数据写入 {FIXED_TARGET_DIR}...")
+            for item_name in US_DATA_ITEMS:
+                src = extracted_dir / item_name
+                dst = FIXED_TARGET_DIR / item_name
+                if not src.exists():
+                    continue
+                if dst.exists():
+                    backup = FIXED_TARGET_DIR / f"{item_name}_backup"
                     if backup.exists():
                         shutil.rmtree(backup, ignore_errors=True)
-                    QLIB_DATA_DIR.rename(backup)
-                    self.signals.log_line.emit(f"[INFO] 旧数据已备份到 {backup}")
-                QLIB_DATA_DIR.mkdir(parents=True, exist_ok=True)
-                for item_name in US_DATA_ITEMS:
-                    src = parent_dir / item_name
-                    dst = QLIB_DATA_DIR / item_name
-                    if src.exists():
-                        src.rename(dst)
-                        self.signals.log_line.emit(f"[INFO] 已移动 {item_name}/ → us_data/{item_name}/")
-            else:
-                features = QLIB_DATA_DIR / "features"
-                if not features.exists():
-                    dirs = [p.name for p in parent_dir.iterdir() if p.is_dir()]
-                    self.signals.log_line.emit(f"[WARN] 未找到 features/ 目录，当前子目录：{dirs}")
+                    dst.rename(backup)
+                shutil.move(str(src), str(dst))
+                self.signals.log_line.emit(f"[INFO] 已更新 {item_name}/")
 
         self.signals.progress.emit(96, "重新初始化 Qlib...")
         self.signals.log_line.emit("[INFO] 正在重新初始化 Qlib...")
