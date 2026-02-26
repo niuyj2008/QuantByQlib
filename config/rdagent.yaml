@@ -1,0 +1,35 @@
+# RD-Agent Docker 集成配置
+rdagent:
+  # Docker 镜像
+  image: "python.azure.cn/rdagent:latest"
+  image_fallback: "ghcr.io/microsoft/rd-agent:latest"
+
+  # 容器运行参数
+  platform: "linux/amd64"     # Apple Silicon 需要此参数（Rosetta 2 模拟）
+  memory_limit: "8g"
+  cpu_count: 4
+
+  # Qlib 数据挂载路径
+  qlib_data_host: "~/.qlib/qlib_data/us_data"
+  qlib_data_container: "/qlib_data"
+
+  # RD-Agent 输出路径
+  output_host: "~/.quantbyqlib/rdagent_output"
+  output_container: "/output"
+
+  # LLM 配置（DeepSeek）
+  chat_model: "deepseek/deepseek-chat"
+  temperature: 0.7
+  max_tokens: 4096
+
+  # 因子发现配置
+  factor_discovery:
+    max_iterations: 10         # 最大迭代轮数
+    population_size: 5         # 每轮生成因子数
+    validation_method: "ic"    # 验证方法：IC 相关性
+    ic_threshold: 0.02         # IC 最低阈值，低于此值丢弃
+
+  # 会话管理
+  session:
+    timeout: 3600              # 单次会话超时（秒）
+    log_interval: 5            # 日志轮询间隔（秒）

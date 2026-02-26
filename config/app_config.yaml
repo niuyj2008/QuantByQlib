@@ -1,0 +1,44 @@
+# QuantByQlib 应用配置
+app:
+  name: "QuantByQlib"
+  version: "1.0.0"
+  language: "zh_CN"
+  theme: "purple"
+
+# 窗口默认尺寸
+window:
+  width: 1400
+  height: 900
+  min_width: 1200
+  min_height: 750
+
+# 数据刷新间隔（秒）
+refresh:
+  portfolio_price: 30      # 持仓价格刷新间隔
+  dashboard: 60            # 仪表盘刷新间隔
+  news: 300                # 新闻刷新间隔
+
+# SQLite 数据库路径
+database:
+  path: "~/.quantbyqlib/portfolio.db"
+
+# 日志配置
+logging:
+  level: "INFO"
+  file: "~/.quantbyqlib/logs/app.log"
+  rotation: "10 MB"
+  retention: "30 days"
+
+# 个股分析超时（秒）
+analysis:
+  timeout: 30
+  max_news: 20
+  sentiment_deep_model: false   # 默认使用 VADER，True 则使用 DistilBERT
+
+# OpenBB 数据源优先级
+openbb:
+  price_providers: ["alpha_vantage", "yfinance"]
+  fundamental_provider: "fmp"
+  news_provider: "finnhub"
+  options_provider: "cboe"
+  macro_provider: "fred"

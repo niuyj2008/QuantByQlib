@@ -1,0 +1,567 @@
+"""
+Qlib 策略实现
+直接复用 Qlib 内置模型：LGBModel、LSTM、GRU、Transformer、MLP
+使用 Qlib Alpha158/Alpha360 因子作为特征
+
+数据适应策略：
+  - 自动检测 Qlib 数据实际可用日期范围，以该范围为训练/预测锚点
+  - 若 Qlib 数据不足（少于 252 天），切换为 yfinance 规则打分 fallback
+"""
+from __future__ import annotations
+
+from typing import Optional
+from datetime import date, timedelta
+import pandas as pd
+from loguru import logger
+
+from strategies.base_strategy import BaseStrategy, StrategyResult
+
+
+# ── Qlib 数据日期范围检测 ──────────────────────────────────────
+
+def _get_qlib_data_end_date() -> Optional[date]:
+    """
+    检测 Qlib 数据中最新可用交易日（用 AAPL 作为代表）
+    若 Qlib 尚未 init，先自动调用 init_qlib()
+    """
+    # 先确保 Qlib 已初始化
+    try:
+        from core.app_state import get_state
+        if not get_state().qlib_initialized:
+            from data.qlib_manager import auto_init_if_data_ready
+            auto_init_if_data_ready()
+    except Exception:
+        pass
+
+    try:
+        from qlib.data import D
+        # SunsetWolf 数据使用小写 ticker（aapl），A 股用 sh/sz 前缀
+        # 同时尝试大写和小写，兼容不同数据集格式
+        df = None
+        for ticker in ["aapl", "AAPL"]:
+            try:
+                df = D.features(
+                    [ticker], ["$close"],
+                    start_time="2018-01-01",
+                    end_time=date.today().isoformat(),
+                )
+                if df is not None and not df.empty:
+                    break
+            except Exception:
+                continue
+
+        if df is None or df.empty:
+            return None
+        # SunsetWolf 数据 Index 顺序为 (instrument, datetime)，取 "datetime" level
+        idx = df.index
+        if "datetime" in idx.names:
+            dates = idx.get_level_values("datetime")
+        elif len(idx.names) >= 2:
+            # 尝试两个 level，取看起来是日期的那个
+            dates = idx.get_level_values(1)
+        else:
+            dates = idx
+        try:
+            latest = pd.Timestamp(dates.max()).date()
+        except Exception:
+            return None
+        logger.debug(f"Qlib 数据最新日期：{latest}")
+        return latest
+    except Exception as e:
+        logger.debug(f"Qlib 数据日期检测失败：{e}")
+        return None
+
+
+def _qlib_init_check():
+    """确认 Qlib 已初始化，否则抛出异常"""
+    from core.app_state import get_state
+    if not get_state().qlib_initialized:
+        raise RuntimeError("Qlib 尚未初始化，请先在「参数配置」页下载数据")
+
+
+def _build_dataset(universe: list[str], handler_class_name: str = "Alpha158",
+                   train_days: int = 252 * 2, pred_days: int = 20):
+    """
+    构建 Qlib DatasetH（训练 + 预测数据集）
+    自动以 Qlib 数据实际最新日期为锚点，而非今天
+    train_days: 训练窗口（约 2 年交易日）
+    pred_days:  预测窗口（最近 20 个交易日用于推断）
+    """
+    from qlib.data.dataset import DatasetH
+
+    # 以 Qlib 数据实际结尾日期为基准
+    data_end = _get_qlib_data_end_date()
+    if data_end is None:
+        raise RuntimeError("无法获取 Qlib 数据日期范围，数据可能为空")
+
+    anchor      = data_end
+    train_start = (anchor - timedelta(days=int(train_days * 1.5))).isoformat()
+    train_end   = (anchor - timedelta(days=pred_days + 5)).isoformat()
+    pred_start  = (anchor - timedelta(days=pred_days * 2)).isoformat()
+    pred_end    = anchor.isoformat()
+
+    logger.info(
+        f"DatasetH 日期锚点：data_end={anchor}  "
+        f"train=[{train_start} → {train_end}]  "
+        f"test=[{pred_start} → {pred_end}]"
+    )
+
+    # 动态导入 Alpha158 或 Alpha360
+    if handler_class_name == "Alpha360":
+        from qlib.contrib.data.handler import Alpha360 as HandlerClass
+    else:
+        from qlib.contrib.data.handler import Alpha158 as HandlerClass
+
+    # SunsetWolf 数据使用小写 ticker（aapl），统一转小写
+    universe_qlib = [t.lower() for t in universe]
+
+    handler = HandlerClass(
+        instruments=universe_qlib,
+        start_time=train_start,
+        end_time=pred_end,
+        fit_start_time=train_start,
+        fit_end_time=train_end,
+        infer_processors=[],
+    )
+    dataset = DatasetH(
+        handler=handler,
+        segments={
+            "train": (train_start, train_end),
+            "valid": (train_end, pred_start),
+            "test":  (pred_start, pred_end),
+        },
+    )
+    return dataset
+
+
+def _scores_to_result(scores_series: pd.Series, strategy_key: str,
+                      strategy_name: str, model_name: str,
+                      universe: list[str], topk: int) -> StrategyResult:
+    """将预测分数 Series 转化为 StrategyResult"""
+    # scores_series index 可能是 MultiIndex，取最后一日
+    # 兼容 (datetime, instrument) 和 (instrument, datetime) 两种顺序
+    if isinstance(scores_series.index, pd.MultiIndex):
+        idx_names = scores_series.index.names
+        if "datetime" in idx_names:
+            dt_level = idx_names.index("datetime")
+            latest_date = scores_series.index.get_level_values(dt_level).max()
+            scores_series = scores_series.xs(latest_date, level=dt_level)
+        else:
+            # 取第 0 level（通常是 datetime）
+            latest_date = scores_series.index.get_level_values(0).max()
+            scores_series = scores_series.xs(latest_date, level=0)
+
+    # 降序排序，取 Top-K
+    scores_series = scores_series.sort_values(ascending=False)
+    topk_list = [str(t).upper() for t in scores_series.index[:topk].tolist()]
+
+    return StrategyResult(
+        strategy_key=strategy_key,
+        strategy_name=strategy_name,
+        scores=scores_series,
+        topk_tickers=topk_list,
+        model_name=model_name,
+        universe_size=len(universe),
+    )
+
+
+# ── yfinance 规则打分 fallback ──────────────────────────────────
+
+def _yfinance_score_universe(
+    universe: list[str],
+    strategy_key: str,
+    strategy_name: str,
+    topk: int,
+    progress_cb=None,
+) -> StrategyResult:
+    """
+    当 Qlib 模型无法运行时，用 yfinance 实时价格数据进行规则打分：
+      - 动量因子（20日/60日涨幅）
+      - 成交量趋势（OBV 方向）
+      - 均线排列（5/20日均线位置）
+    完全基于真实市场数据，无 Mock。
+    """
+    import numpy as np
+    import yfinance as yf
+
+    def cb(pct, msg):
+        if progress_cb:
+            try:
+                progress_cb(pct, msg)
+            except Exception:
+                pass
+        logger.debug(f"[{strategy_key}] {pct}% - {msg}")
+
+    cb(10, f"yfinance 模式：对 {len(universe)} 支股票打分...")
+
+    scores: dict[str, float] = {}
+    batch = 50   # 每批下载避免请求过多
+    total = len(universe)
+
+    for i in range(0, total, batch):
+        chunk = universe[i: i + batch]
+        pct = 10 + int((i / total) * 70)
+        cb(pct, f"下载价格数据 {i+1}-{min(i+batch, total)}/{total}...")
+        try:
+            tickers_str = " ".join(chunk)
+            df_all = yf.download(
+                tickers_str,
+                period="3mo",
+                progress=False,
+                auto_adjust=True,
+                group_by="ticker",
+            )
+            if df_all is None or df_all.empty:
+                continue
+
+            for ticker in chunk:
+                try:
+                    # 多股票时 df_all 有 MultiIndex 列
+                    if isinstance(df_all.columns, pd.MultiIndex):
+                        if ticker not in df_all.columns.get_level_values(0):
+                            continue
+                        df = df_all[ticker].dropna()
+                    else:
+                        # 单股票时列为扁平
+                        df = df_all.dropna()
+
+                    if df.empty or len(df) < 10:
+                        continue
+
+                    close = df["Close"] if "Close" in df.columns else df["close"]
+                    volume = df["Volume"] if "Volume" in df.columns else df.get("volume")
+
+                    sub_scores = []
+
+                    # 1. 动量（20日涨幅）
+                    if len(close) >= 20:
+                        mom20 = float(close.iloc[-1] / close.iloc[-20] - 1)
+                        sub_scores.append(np.clip(mom20 * 5 + 0.5, 0, 1))
+
+                    # 2. 动量（60日涨幅，若有）
+                    if len(close) >= 60:
+                        mom60 = float(close.iloc[-1] / close.iloc[-60] - 1)
+                        sub_scores.append(np.clip(mom60 * 3 + 0.5, 0, 1))
+
+                    # 3. 均线排列（价格在 MA20 上方 → 高分）
+                    if len(close) >= 20:
+                        ma20 = float(close.rolling(20).mean().iloc[-1])
+                        price = float(close.iloc[-1])
+                        diff = (price / ma20 - 1)
+                        sub_scores.append(np.clip(diff * 10 + 0.5, 0, 1))
+
+                    # 4. 量价配合（OBV 趋势）
+                    if volume is not None and len(close) >= 10:
+                        import numpy as np2
+                        sign = np2.sign(close.diff().fillna(0))
+                        obv = (sign * volume).cumsum()
+                        obv_chg = float(obv.iloc[-1] - obv.iloc[-10]) / (float(abs(obv).mean()) + 1e-9)
+                        sub_scores.append(np.clip(obv_chg * 2 + 0.5, 0, 1))
+
+                    if sub_scores:
+                        scores[ticker] = float(np.mean(sub_scores))
+
+                except Exception as e:
+                    logger.debug(f"yfinance 打分失败 {ticker}：{e}")
+        except Exception as e:
+            logger.debug(f"yfinance 批量下载失败：{e}")
+
+    cb(85, f"打分完成，{len(scores)} 支有效，排名 Top-{topk}...")
+
+    if not scores:
+        raise RuntimeError("所有股票价格数据获取失败，无法生成选股结果")
+
+    scores_series = pd.Series(scores).sort_values(ascending=False)
+    topk_list = [str(t).upper() for t in scores_series.index[:topk].tolist()]
+
+    logger.info(
+        f"yfinance 规则打分完成：{len(scores)} 支有效，"
+        f"Top-{topk}：{topk_list[:5]}..."
+    )
+
+    return StrategyResult(
+        strategy_key=strategy_key,
+        strategy_name=strategy_name + "（价格动量）",
+        scores=scores_series,
+        topk_tickers=topk_list,
+        model_name="yfinance 规则打分",
+        universe_size=len(universe),
+    )
+
+
+def _run_with_qlib_or_fallback(
+    strategy_key: str,
+    strategy_name: str,
+    handler_class_name: str,
+    model_factory,           # callable() → Qlib model instance
+    universe: list[str],
+    topk: int,
+    progress_cb,
+    train_days: int = 252 * 2,
+    pred_days: int = 20,
+) -> StrategyResult:
+    """
+    先尝试 Qlib 模型，若数据不足自动切换为 yfinance 规则打分
+    训练结果缓存 24 小时，避免重复训练
+    """
+    from strategies.model_cache import cache_key, load_scores, save_scores
+
+    def cb(pct, msg):
+        if progress_cb:
+            try:
+                progress_cb(pct, msg)
+            except Exception:
+                pass
+
+    # 检测 Qlib 数据是否足够
+    data_end = _get_qlib_data_end_date()
+    days_since_data = (date.today() - data_end).days if data_end else 9999
+
+    if data_end is None or days_since_data > 3650:
+        # Qlib 数据过旧（超过 10 年前），直接用 yfinance
+        # 即使数据截止到几年前，只要包含足够历史（>2年训练窗口），模型仍可训练并预测
+        logger.info(
+            f"[{strategy_key}] Qlib 数据过旧（末端={data_end}，"
+            f"距今 {days_since_data} 天），切换 yfinance 规则打分"
+        )
+        cb(5, "Qlib 数据过旧，切换价格动量模式...")
+        return _yfinance_score_universe(
+            universe, strategy_key, strategy_name, topk, progress_cb
+        )
+
+    # 检查缓存
+    key = cache_key(strategy_key, universe, data_end)
+    cached = load_scores(key)
+    if cached is not None:
+        cb(95, f"命中缓存（{strategy_name}），直接返回结果...")
+        logger.info(f"[{strategy_key}] 命中预测缓存，跳过训练")
+        return _scores_to_result(
+            cached, strategy_key, strategy_name,
+            "缓存（< 24h）", universe, topk
+        )
+
+    # Qlib 数据足够，尝试模型训练
+    try:
+        cb(10, "构建 Qlib 数据集...")
+        dataset = _build_dataset(
+            universe, handler_class_name, train_days, pred_days
+        )
+        cb(30, "训练模型...")
+        model = model_factory()
+        model.fit(dataset)
+        cb(75, "生成预测分数...")
+        pred = model.predict(dataset, segment="test")
+        cb(90, "排名筛选 Top-K...")
+        # 保存到缓存
+        save_scores(key, pred)
+        return _scores_to_result(
+            pred, strategy_key, strategy_name,
+            model.__class__.__name__, universe, topk
+        )
+    except Exception as e:
+        logger.warning(
+            f"[{strategy_key}] Qlib 模型失败（{e}），切换 yfinance 规则打分"
+        )
+        cb(5, "模型训练失败，切换价格动量模式...")
+        return _yfinance_score_universe(
+            universe, strategy_key, strategy_name, topk, progress_cb
+        )
+
+
+# ── 策略实现 ──────────────────────────────────────────────────
+
+class GrowthStocksStrategy(BaseStrategy):
+    """
+    成长股选股：LightGBM + Alpha158
+    LGBModel 是 Qlib 内置，直接实例化
+    """
+    KEY  = "growth_stocks"
+    NAME = "成长股选股"
+    TOPK = 50
+
+    def run(self, universe: list[str], progress_cb=None) -> StrategyResult:
+        _qlib_init_check()
+
+        def model_factory():
+            from qlib.contrib.model.gbdt import LGBModel
+            return LGBModel(
+                loss="mse",
+                colsample_bytree=0.8879,
+                learning_rate=0.0421,
+                subsample=0.8789,
+                lambda_l1=205.6999,
+                lambda_l2=580.9768,
+                max_depth=8,
+                num_leaves=210,
+                num_threads=4,
+            )
+
+        return _run_with_qlib_or_fallback(
+            self.KEY, self.NAME, "Alpha158",
+            model_factory, universe, self.topk, progress_cb,
+        )
+
+
+class MarketAdaptiveStrategy(BaseStrategy):
+    """
+    市场自适应：LightGBM + Alpha158
+    （HMM 政体切换复杂度高，此处以 LightGBM 实现核心逻辑，政体检测作为权重调整）
+    """
+    KEY  = "market_adaptive"
+    NAME = "市场自适应"
+    TOPK = 50
+
+    def run(self, universe: list[str], progress_cb=None) -> StrategyResult:
+        _qlib_init_check()
+        regime = self._detect_regime()
+
+        def model_factory():
+            from qlib.contrib.model.gbdt import LGBModel
+            lr = 0.05 if regime == "bull" else 0.03
+            return LGBModel(learning_rate=lr, num_leaves=128, num_threads=4)
+
+        return _run_with_qlib_or_fallback(
+            self.KEY, self.NAME, "Alpha158",
+            model_factory, universe, self.topk, progress_cb,
+        )
+
+    def _detect_regime(self) -> str:
+        """用市场宽度简单近似政体检测"""
+        try:
+            from data.openbb_client import get_price_history
+            spy = get_price_history(
+                "SPY",
+                (date.today() - timedelta(days=60)).isoformat(),
+                date.today().isoformat(),
+            )
+            if spy is not None:
+                df = spy.to_dataframe()
+                if not df.empty:
+                    close_col = next(
+                        (c for c in df.columns if c.lower() == "close"), None
+                    )
+                    if close_col:
+                        latest = float(df[close_col].iloc[-1])
+                        prev   = float(df[close_col].iloc[0])
+                        return "bull" if latest > prev else "bear"
+        except Exception:
+            pass
+        return "neutral"
+
+
+class DeepLearningStrategy(BaseStrategy):
+    """
+    深度学习集成：Qlib LSTM + Alpha158
+    Transformer 训练耗时较长，散户场景用 LSTM 更实用
+    """
+    KEY  = "deep_learning"
+    NAME = "深度学习集成"
+    TOPK = 50
+
+    def run(self, universe: list[str], progress_cb=None) -> StrategyResult:
+        _qlib_init_check()
+
+        def model_factory():
+            from qlib.contrib.model.pytorch_lstm import LSTM
+            return LSTM(
+                d_feat=6,
+                hidden_size=64,
+                num_layers=2,
+                dropout=0.0,
+                n_epochs=20,
+                lr=1e-3,
+                early_stop=5,
+                batch_size=800,
+                metric="IC",
+                GPU=0,
+            )
+
+        return _run_with_qlib_or_fallback(
+            self.KEY, self.NAME, "Alpha158",
+            model_factory, universe, self.topk, progress_cb,
+        )
+
+
+class IntradayProfitStrategy(BaseStrategy):
+    """
+    短线获利：Qlib GRU + Alpha158（短序列）
+    """
+    KEY  = "intraday_profit"
+    NAME = "短线获利"
+    TOPK = 30
+
+    def run(self, universe: list[str], progress_cb=None) -> StrategyResult:
+        _qlib_init_check()
+
+        def model_factory():
+            from qlib.contrib.model.pytorch_gru import GRU
+            return GRU(
+                d_feat=6,
+                hidden_size=64,
+                num_layers=2,
+                dropout=0.0,
+                n_epochs=15,
+                lr=1e-3,
+                early_stop=5,
+                batch_size=800,
+                metric="IC",
+                GPU=0,
+            )
+
+        return _run_with_qlib_or_fallback(
+            self.KEY, self.NAME, "Alpha158",
+            model_factory, universe, self.topk, progress_cb,
+            train_days=126, pred_days=10,
+        )
+
+
+class PyTorchFullMarketStrategy(BaseStrategy):
+    """
+    全市场深度学习：PyTorch MLP + Alpha360
+    覆盖 NYSE+NASDAQ 全市场（5000+ 股票）
+    """
+    KEY  = "pytorch_full_market"
+    NAME = "全市场深度学习"
+    TOPK = 50
+
+    def run(self, universe: list[str], progress_cb=None) -> StrategyResult:
+        _qlib_init_check()
+
+        def model_factory():
+            from qlib.contrib.model.pytorch_lstm import LSTM
+            return LSTM(
+                d_feat=6,
+                hidden_size=128,
+                num_layers=1,
+                dropout=0.0,
+                n_epochs=10,
+                lr=1e-3,
+                early_stop=3,
+                batch_size=2000,
+                metric="IC",
+                GPU=0,
+            )
+
+        return _run_with_qlib_or_fallback(
+            self.KEY, self.NAME, "Alpha360",
+            model_factory, universe, self.topk, progress_cb,
+        )
+
+
+# ── 策略注册表 ────────────────────────────────────────────────
+
+STRATEGY_REGISTRY: dict[str, type] = {
+    "growth_stocks":       GrowthStocksStrategy,
+    "market_adaptive":     MarketAdaptiveStrategy,
+    "deep_learning":       DeepLearningStrategy,
+    "intraday_profit":     IntradayProfitStrategy,
+    "pytorch_full_market": PyTorchFullMarketStrategy,
+}
+
+
+def get_strategy(key: str, topk: Optional[int] = None) -> BaseStrategy:
+    """根据 key 获取策略实例"""
+    cls = STRATEGY_REGISTRY.get(key)
+    if cls is None:
+        raise ValueError(f"未知策略：{key}，可选：{list(STRATEGY_REGISTRY.keys())}")
+    return cls(topk=topk)

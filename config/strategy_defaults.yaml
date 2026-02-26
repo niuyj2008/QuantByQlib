@@ -1,0 +1,80 @@
+# 量化策略默认参数
+
+# 通用策略参数
+common:
+  topk: 50                   # 选股数量
+  n_drop: 5                  # 每期换出股票数
+  hold_thresh: 1             # 最少持有天数
+
+strategies:
+  # 深度学习集成（Transformer + LSTM + Attention）
+  deep_learning:
+    name: "深度学习集成"
+    description: "融合 Transformer、LSTM、Attention 机制的集成模型，适合捕捉复杂非线性关系"
+    model_type: "transformer"
+    hidden_size: 128
+    num_layers: 2
+    dropout: 0.1
+    n_epochs: 50
+    lr: 0.001
+    topk: 50
+    handler: "Alpha158"
+    risk_level: "moderate"
+
+  # 短线日内（GRU）
+  intraday_profit:
+    name: "短线获利"
+    description: "基于 GRU 的短序列模型，捕捉短期动量效应，适合活跃交易者"
+    model_type: "gru"
+    hidden_size: 64
+    num_layers: 2
+    dropout: 0.1
+    n_epochs: 30
+    lr: 0.001
+    topk: 30
+    handler: "Alpha158"
+    risk_level: "aggressive"
+
+  # 成长股选择（LightGBM）
+  growth_stocks:
+    name: "成长股选股"
+    description: "LightGBM 梯度提升，结合动量因子，聚焦高成长潜力股票"
+    model_type: "lgbm"
+    num_leaves: 128
+    n_estimators: 200
+    learning_rate: 0.05
+    topk: 50
+    handler: "Alpha158"
+    risk_level: "conservative"
+
+  # 市场自适应（HMM 政体切换）
+  market_adaptive:
+    name: "市场自适应"
+    description: "HMM 检测市场政体（牛熊震荡），自动切换策略参数，适应市场周期"
+    model_type: "lgbm"
+    regimes: ["bull", "bear", "sideways"]
+    topk: 50
+    handler: "Alpha158"
+    risk_level: "moderate"
+
+  # 全市场 PyTorch MLP
+  pytorch_full_market:
+    name: "全市场深度学习"
+    description: "PyTorch MLP 覆盖 NYSE+NASDAQ 全市场 5000+ 股票，挖掘被低估机会"
+    model_type: "mlp"
+    hidden_sizes: [512, 256, 128]
+    dropout: 0.3
+    n_epochs: 100
+    lr: 0.0005
+    topk: 50
+    handler: "Alpha360"
+    risk_level: "aggressive"
+
+# 回测默认参数
+backtest:
+  start_time: "2020-01-01"
+  end_time: "2023-12-31"
+  benchmark: "^GSPC"          # S&P500 基准
+  account: 100000000          # 初始资金（1亿，Qlib 默认单位）
+  cost_rate: 0.001            # 交易成本率（万分之十）
+  min_cost: 0                 # 最低交易成本

@@ -1,0 +1,26 @@
+# Qlib 美股配置
+qlib:
+  provider_uri: "~/.qlib/qlib_data/us_data"
+  region: "us"
+  expression_cache: null
+  dataset_cache: null
+
+# 数据采集配置（Qlib Yahoo 采集器参数）
+data_collection:
+  start_date: "2015-01-01"
+  end_date: null              # null = 今日
+  universe: "sp500"           # 初始采集 S&P500，扩展时用 all
+  workers: 8                  # 并发下载线程数
+  delay: 0.5                  # 每次请求间隔（秒），避免被限速
+
+# Alpha158 因子配置
+alpha158:
+  start_time: "-252d"         # 回看 252 个交易日（1年）
+  end_time: "today"
+  fit_start_time: "2017-01-01"
+  fit_end_time: "2021-12-31"
+
+# Alpha360 因子配置（扩展选项）
+alpha360:
+  start_time: "-60d"
+  end_time: "today"
