@@ -175,6 +175,8 @@ def _scores_to_result(scores_series: pd.Series, strategy_key: str,
                       strategy_name: str, model_name: str,
                       universe: list[str], topk: int) -> StrategyResult:
     """将预测分数 Series 转化为 StrategyResult"""
+    import numpy as np
+
     # scores_series index 可能是 MultiIndex，取最后一日
     # 兼容 (datetime, instrument) 和 (instrument, datetime) 两种顺序
     if isinstance(scores_series.index, pd.MultiIndex):
@@ -184,13 +186,23 @@ def _scores_to_result(scores_series: pd.Series, strategy_key: str,
             latest_date = scores_series.index.get_level_values(dt_level).max()
             scores_series = scores_series.xs(latest_date, level=dt_level)
         else:
-            # 取第 0 level（通常是 datetime）
             latest_date = scores_series.index.get_level_values(0).max()
             scores_series = scores_series.xs(latest_date, level=0)
 
+    # 统一 index 为大写（Qlib 存储小写 aapl，UI 显示大写 AAPL）
+    scores_series.index = scores_series.index.str.upper()
+
+    # 去除 NaN 分数（LSTM 输入含 NaN 时预测结果为 NaN）
+    valid_mask = scores_series.notna() & np.isfinite(scores_series)
+    if valid_mask.sum() == 0:
+        logger.warning(f"[{strategy_key}] 所有预测分数为 NaN，用 0 填充")
+        scores_series = scores_series.fillna(0.0)
+    else:
+        scores_series = scores_series[valid_mask]
+
     # 降序排序，取 Top-K
     scores_series = scores_series.sort_values(ascending=False)
-    topk_list = [str(t).upper() for t in scores_series.index[:topk].tolist()]
+    topk_list = scores_series.index[:topk].tolist()
 
     return StrategyResult(
         strategy_key=strategy_key,
@@ -328,11 +340,12 @@ def _yfinance_score_universe(
 
 def _patch_pytorch_model_best_param(model) -> None:
     """
-    修复 Qlib 0.9.7 LSTM/GRU fit() 中 best_param 未赋值的 bug。
-    当第一个 epoch val_score 为 nan（NaN loss）时，
-    if val_score > best_score 条件为 False，best_param 永远不被赋值，
-    导致 fit 结束时 load_state_dict(best_param) 抛 UnboundLocalError。
-    通过 monkey-patch fit() 在训练前先初始化 best_param 解决。
+    修复 Qlib 0.9.7 LSTM/GRU 两个 bug：
+    1. fit() 中 best_param 未赋值：当第一个 epoch val_score=nan 时
+       if val_score > best_score 条件为 False，best_param 永远不被赋值，
+       导致 fit 结束时 load_state_dict(best_param) 抛 UnboundLocalError。
+    2. predict() 中 NaN 传播：x_test 含 NaN 特征（Alpha158 边界行），
+       送入 LSTM 后输出全为 NaN；通过 fillna(0) 预处理解决。
     """
     import copy, types, numpy as np_
     import torch
@@ -400,6 +413,40 @@ def _patch_pytorch_model_best_param(model) -> None:
 
     model.fit = types.MethodType(patched_fit, model)
 
+    # ── patch predict：在 x_values 送入网络前 fillna(0) ──────
+    original_predict = model.predict.__func__ if hasattr(model.predict, '__func__') else None
+    if original_predict is None:
+        return
+
+    def patched_predict(self, dataset, segment="test"):
+        import pandas as pd_
+        import numpy as np_
+        from qlib.data.dataset.handler import DataHandlerLP
+
+        x_test = dataset.prepare(segment, col_set="feature", data_key=DataHandlerLP.DK_I)
+        index = x_test.index
+
+        # 用列均值填充 NaN，避免 NaN 在 LSTM 中传播导致输出全为 NaN
+        x_filled = x_test.fillna(x_test.mean()).fillna(0.0)
+        x_values = x_filled.values
+
+        nn_model = self.lstm_model if hasattr(self, 'lstm_model') else self.gru_model
+        nn_model.eval()
+        sample_num = x_values.shape[0]
+        preds = []
+
+        import torch
+        for begin in range(0, sample_num, self.batch_size):
+            end = min(begin + self.batch_size, sample_num)
+            x_batch = torch.from_numpy(x_values[begin:end]).float().to(self.device)
+            with torch.no_grad():
+                pred = nn_model(x_batch).detach().cpu().numpy()
+            preds.append(pred)
+
+        return pd_.Series(np_.concatenate(preds), index=index)
+
+    model.predict = types.MethodType(patched_predict, model)
+
 
 def _run_with_qlib_or_fallback(
     strategy_key: str,
@@ -465,6 +512,27 @@ def _run_with_qlib_or_fallback(
         model.fit(dataset)
         cb(75, "生成预测分数...")
         pred = model.predict(dataset, segment="test")
+
+        # LSTM/GRU 在输入含 NaN 特征时输出为 NaN；
+        # 对每支股票取其最近非 NaN 预测，或用该批均值填充
+        if isinstance(pred.index, pd.MultiIndex):
+            # 按 instrument 分组，各取最后一条非 NaN
+            valid_pred = (
+                pred.groupby(level="instrument")
+                    .last()
+                    .dropna()
+            )
+            if valid_pred.empty:
+                # 退回到每日均值填充
+                valid_pred = pred.groupby(level="instrument").mean()
+        else:
+            valid_pred = pred.dropna()
+
+        if valid_pred.empty:
+            raise RuntimeError("LSTM 预测结果全为 NaN，无法生成选股分数")
+
+        pred = valid_pred
+        logger.info(f"[{strategy_key}] 预测有效股票数：{len(pred)}")
         cb(90, "排名筛选 Top-K...")
         # 保存到缓存
         save_scores(key, pred)

@@ -198,7 +198,48 @@ class StockScreener:
     # ── 工具方法 ──────────────────────────────────────────────
 
     def _batch_get_changes(self, tickers: list[str]) -> dict[str, Optional[float]]:
-        """批量获取今日涨跌幅"""
+        """批量获取今日涨跌幅，优先用 yfinance 一次性批量请求"""
+        if not tickers:
+            return {}
+        try:
+            import yfinance as yf
+            import pandas as pd
+            # 一次性批量下载最近 2 天，计算涨跌幅
+            symbols = " ".join(tickers)
+            df = yf.download(
+                symbols,
+                period="2d",
+                auto_adjust=True,
+                progress=False,
+                threads=True,
+                group_by="ticker",
+            )
+            if df is None or df.empty:
+                return {t: None for t in tickers}
+
+            result: dict[str, Optional[float]] = {}
+            for ticker in tickers:
+                try:
+                    if isinstance(df.columns, pd.MultiIndex):
+                        if ticker not in df.columns.get_level_values(0):
+                            result[ticker] = None
+                            continue
+                        closes = df[ticker]["Close"].dropna()
+                    else:
+                        closes = df["Close"].dropna()
+
+                    if len(closes) >= 2:
+                        pct = float((closes.iloc[-1] / closes.iloc[-2] - 1) * 100)
+                        result[ticker] = round(pct, 2)
+                    else:
+                        result[ticker] = None
+                except Exception:
+                    result[ticker] = None
+            return result
+        except Exception as e:
+            logger.warning(f"yfinance 批量涨跌幅获取失败：{e}，尝试 OpenBB...")
+
+        # 降级：OpenBB
         try:
             from data.openbb_client import get_batch_quotes
             quotes = get_batch_quotes(tickers)
@@ -207,7 +248,7 @@ class StockScreener:
                 for t, q in quotes.items()
             }
         except Exception as e:
-            logger.warning(f"批量涨跌幅获取失败：{e}")
+            logger.warning(f"OpenBB 涨跌幅获取失败：{e}")
             return {t: None for t in tickers}
 
     def _score_to_signal(self, score: float, all_scores) -> str:
