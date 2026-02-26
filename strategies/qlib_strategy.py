@@ -355,8 +355,13 @@ def _patch_pytorch_model_best_param(model) -> None:
         return  # 无法 patch，跳过
 
     def patched_fit(self, dataset, evals_result=dict(), save_path=None):
+        import torch
         from qlib.data.dataset.handler import DataHandlerLP
         from qlib.utils import get_or_create_path
+
+        # 限制 PyTorch 线程数，避免与 Qt 线程池竞争导致进程崩溃
+        torch.set_num_threads(2)
+        torch.set_num_interop_threads(1)
 
         df_train, df_valid, df_test = dataset.prepare(
             ["train", "valid", "test"],
@@ -366,8 +371,21 @@ def _patch_pytorch_model_best_param(model) -> None:
         if df_train.empty or df_valid.empty:
             raise ValueError("Empty data from dataset, please check your dataset config.")
 
-        x_train, y_train = df_train["feature"], df_train["label"]
-        x_valid, y_valid = df_valid["feature"], df_valid["label"]
+        # fillna 防止 NaN 传播到 PyTorch 损失计算（导致 loss=nan，val_score=nan）
+        feat_train = df_train["feature"].fillna(df_train["feature"].mean()).fillna(0.0)
+        feat_valid = df_valid["feature"].fillna(df_valid["feature"].mean()).fillna(0.0)
+        label_train = df_train["label"].fillna(0.0)
+        label_valid = df_valid["label"].fillna(0.0)
+
+        x_train, y_train = feat_train, label_train
+        x_valid, y_valid = feat_valid, label_valid
+
+        # 动态限制 batch_size：Qlib train_epoch/test_epoch 当 batch_size > 样本数时
+        # 整个循环不执行，scores=[]，np.mean([])=nan，导致 val_score 全为 nan。
+        # 将 batch_size 限制为 min(原设定, 验证集大小, 训练集大小)
+        min_samples = min(len(x_train), len(x_valid))
+        if self.batch_size > min_samples:
+            self.batch_size = max(1, min_samples)
 
         save_path = get_or_create_path(save_path)
         stop_steps = 0
