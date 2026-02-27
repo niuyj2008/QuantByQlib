@@ -348,6 +348,12 @@ def _patch_pytorch_model_best_param(model) -> None:
        送入 LSTM 后输出全为 NaN；通过 fillna(0) 预处理解决。
     """
     import copy, types, numpy as np_
+
+    # 只对 PyTorch 模型（LSTM/GRU/MLP）打补丁，LightGBM 等非 PyTorch 模型直接跳过
+    _pytorch_model_names = ("LSTM", "GRU", "MLP", "Net", "Transformer", "ALSTM")
+    if not any(name in type(model).__name__ for name in _pytorch_model_names):
+        return
+
     import torch
 
     original_fit = model.fit.__func__ if hasattr(model.fit, '__func__') else None
@@ -358,10 +364,6 @@ def _patch_pytorch_model_best_param(model) -> None:
         import torch
         from qlib.data.dataset.handler import DataHandlerLP
         from qlib.utils import get_or_create_path
-
-        # 限制 PyTorch 线程数，避免与 Qt 线程池竞争导致进程崩溃
-        torch.set_num_threads(2)
-        torch.set_num_interop_threads(1)
 
         df_train, df_valid, df_test = dataset.prepare(
             ["train", "valid", "test"],

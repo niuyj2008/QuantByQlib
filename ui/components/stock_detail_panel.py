@@ -99,16 +99,21 @@ class StockDetailPanel(QWidget):
 
     # ── 公开接口 ──────────────────────────────────────────────
 
-    def load(self, ticker: str, quant_score: Optional[float] = None) -> None:
+    def load(self, ticker: str, quant_score: Optional[float] = None,
+             qlib_signal: Optional[str] = None, qlib_rank: Optional[int] = None) -> None:
         """
         触发后台分析并加载个股数据
-        quant_score: 来自选股模型的评分（0-1），None 表示非选股场景
+        quant_score: 来自选股模型的原始预测分数，None 表示非选股场景
+        qlib_signal: Qlib 信号文字（买入/观察/持有），用于面板展示
+        qlib_rank:   在选股结果中的排名
         """
         ticker = ticker.upper().strip()
         if not ticker:
             return
         self._current_ticker = ticker
         self._quant_score    = quant_score
+        self._qlib_signal    = qlib_signal
+        self._qlib_rank      = qlib_rank
         self._show_loading(ticker)
         self._start_worker(ticker)
 
@@ -338,7 +343,7 @@ class StockDetailPanel(QWidget):
             self._content_layout.addWidget(no_price)
 
     def _render_overall_score(self, overall) -> None:
-        self._content_layout.addWidget(_SectionTitle("综合评分"))
+        self._content_layout.addWidget(_SectionTitle("综合分析评分（独立于Qlib）"))
 
         row = QHBoxLayout()
 
@@ -409,14 +414,32 @@ class StockDetailPanel(QWidget):
         self._content_layout.addLayout(row)
 
     def _render_quant_score(self, score: float) -> None:
-        self._content_layout.addWidget(_SectionTitle("Qlib 量化评分"))
-        row = _MetricRow(
-            "模型综合分数",
-            f"{score:.4f}",
-            "强势" if score > 0.7 else ("中性" if score > 0.4 else "偏弱"),
-            "bullish" if score > 0.7 else ("neutral" if score > 0.4 else "bearish"),
-        )
-        self._content_layout.addWidget(row)
+        self._content_layout.addWidget(_SectionTitle("Qlib 量化选股信号"))
+
+        # 用选股信号判断强弱（信号由 stock_screener 按相对排名计算，与综合评分无关）
+        qlib_signal = getattr(self, "_qlib_signal", None)
+        qlib_rank   = getattr(self, "_qlib_rank",   None)
+
+        if qlib_signal in ("买入",):
+            grade, grade_type = "量化买入", "bullish"
+        elif qlib_signal in ("卖出",):
+            grade, grade_type = "量化卖出", "bearish"
+        else:
+            grade, grade_type = "量化观察", "neutral"
+
+        rank_str = f"第 {qlib_rank} 名" if qlib_rank else "--"
+        self._content_layout.addWidget(_MetricRow(
+            "选股排名", rank_str, grade, grade_type,
+        ))
+        self._content_layout.addWidget(_MetricRow(
+            "模型原始分数", f"{score:.4f}", "LightGBM 相对收益预测", "neutral",
+        ))
+
+        # 说明文字
+        note = QLabel("⚠ 此信号为 Qlib 量化模型输出，与上方综合分析评分相互独立")
+        note.setWordWrap(True)
+        note.setStyleSheet(f"color:{COLORS['text_muted']}; font-size:10px; padding:4px 0;")
+        self._content_layout.addWidget(note)
 
     def _render_technical(self, tech) -> None:
         self._content_layout.addWidget(_SectionTitle("Alpha158 技术信号"))

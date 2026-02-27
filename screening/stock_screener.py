@@ -155,29 +155,14 @@ class StockScreener:
             if close_bin.exists() and close_bin.stat().st_size > 4004:
                 core_valid.append(ticker)
 
-        # 再枚举其余有效股票作为补充
-        core_set = {t.lower() for t in core_valid}
-        extra = []
-        for d in features_dir.iterdir():
-            if not d.is_dir():
-                continue
-            name = d.name
-            if name in core_set:
-                continue
-            if any(name.lower().startswith(pfx) for pfx in ("sh", "sz", "bj", "^", "_")):
-                continue
-            if not name.replace("-", "").replace(".", "").isalnum():
-                continue
-            close_bin = d / "close.day.bin"
-            if not close_bin.exists() or close_bin.stat().st_size < 4004:
-                continue
-            extra.append(name.upper())
-
-        tickers = core_valid + sorted(extra)
+        # 只使用核心蓝筹股，不加入其他小票：
+        # 小票 Alpha158 因子缺失率高，LightGBM 对缺失特征走同一路径输出相同分数，
+        # 导致大量股票得分相同，选股结果无意义。
+        tickers = core_valid
         logger.info(
-            f"Qlib 美股宇宙：{len(tickers)} 支（核心大盘股 {len(core_valid)} 支优先，来自 {data_dir}）"
+            f"Qlib 美股宇宙：{len(tickers)} 支核心蓝筹股（来自 {data_dir}）"
         )
-        return tickers[:2000]
+        return tickers
 
     def _sp500_fallback(self) -> list[str]:
         """内置精简宇宙（约 100 支大盘股），仅作备用"""

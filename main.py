@@ -33,6 +33,15 @@ _load_dotenv()
 from utils.logger import setup_logger, logger
 setup_logger()
 
+# ── 预导入 PyTorch（必须在主线程完成，避免子线程首次 import 触发 GIL 死锁）
+try:
+    import torch
+    torch.set_num_threads(2)
+    torch.set_num_interop_threads(1)
+    logger.debug(f"PyTorch {torch.__version__} 预加载完成（主线程）")
+except Exception as _torch_err:
+    logger.warning(f"PyTorch 预加载失败（深度学习策略将不可用）：{_torch_err}")
+
 # ── 启动 Qt 应用 ─────────────────────────────────────────────
 def main() -> int:
     from PyQt6.QtWidgets import QApplication

@@ -179,9 +179,15 @@ class ResultsPage(QWidget):
 
         ticker = ticker_item.text()
         score  = float(score_item.text()) if score_item else None
+        # 读取 Qlib 信号列（第3列）和排名（第0列）
+        signal_item = self._table.item(row, 3)
+        rank_item   = self._table.item(row, 0)
+        qlib_signal = signal_item.text() if signal_item else None
+        qlib_rank   = int(rank_item.text()) if rank_item else None
 
         # 直接加载个股详情面板（不经过事件总线，避免双重触发）
-        self._detail_panel.load(ticker, quant_score=score)
+        self._detail_panel.load(ticker, quant_score=score,
+                                qlib_signal=qlib_signal, qlib_rank=qlib_rank)
 
     def _apply_filter(self) -> None:
         keyword = self._search_input.text().strip().upper()
