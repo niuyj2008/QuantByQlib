@@ -304,24 +304,34 @@ class DashboardPage(QWidget):
         try:
             from portfolio.manager import get_portfolio_manager
             pm = get_portfolio_manager()
-            summary = pm.get_summary()
 
-            total_value    = summary.get("total_market_value", 0.0)
-            total_cost     = summary.get("total_cost", 0.0)
-            unrealized_pnl = summary.get("total_unrealized_pnl", 0.0)
-            realized_pnl   = summary.get("total_realized_pnl", 0.0)
+            # 一次获取含价格的持仓列表，避免重复网络请求
+            positions = pm.get_positions_with_prices()
+
+            # 在本地汇总，与 get_summary() 逻辑保持一致
+            n_pos          = len(positions)
+            total_invested = sum(p.get("cost_basis", 0.0) for p in positions)
+            total_value    = sum(p.get("market_value", 0.0) for p in positions)
+            unrealized_pnl = total_value - total_invested
+            realized_pnl   = pm._db.get_realized_pnl() if positions else 0.0
             total_pnl      = unrealized_pnl + realized_pnl
-            positions      = summary.get("positions", [])
-            n_pos          = len([p for p in positions if p.get("shares", 0) > 0])
+
+            # 今日浮动盈亏
+            today_pnl = 0.0
+            for p in positions:
+                chg = p.get("today_change_pct")
+                if chg is not None and p.get("market_value", 0) > 0:
+                    yest_val = p["market_value"] / (1 + chg / 100)
+                    today_pnl += p["market_value"] - yest_val
 
             # 市值卡片
-            mv_str = f"${total_value:,.0f}" if total_value else "--"
-            cost_str = f"总投入：${total_cost:,.0f}" if total_cost else "总投入：--"
+            mv_str   = f"${total_value:,.0f}" if total_value else "--"
+            cost_str = f"总投入：${total_invested:,.0f}" if total_invested else "总投入：--"
             self._card_market_value.update(mv_str, subtitle=cost_str)
 
             # 盈亏卡片
-            if total_cost > 0:
-                pnl_pct   = total_pnl / total_cost * 100
+            if total_invested > 0:
+                pnl_pct   = total_pnl / total_invested * 100
                 pnl_color = COLORS["success"] if total_pnl >= 0 else COLORS["danger"]
                 sign      = "+" if total_pnl >= 0 else ""
                 pnl_str   = f"{sign}${total_pnl:,.0f}"
@@ -332,27 +342,26 @@ class DashboardPage(QWidget):
             else:
                 self._card_total_pnl.update("--")
 
-            # 今日盈亏（简化：显示未实现 PnL 作为快照）
-            if unrealized_pnl != 0 and total_cost > 0:
-                upnl_color = COLORS["success"] if unrealized_pnl >= 0 else COLORS["danger"]
-                sign = "+" if unrealized_pnl >= 0 else ""
+            # 今日涨跌
+            if today_pnl != 0:
+                td_color = COLORS["success"] if today_pnl >= 0 else COLORS["danger"]
+                sign = "+" if today_pnl >= 0 else ""
                 self._card_today_pnl.update(
-                    f"{sign}${unrealized_pnl:,.0f}",
-                    color=upnl_color,
-                    subtitle="未实现盈亏"
+                    f"{sign}${today_pnl:,.0f}",
+                    color=td_color,
+                    subtitle="今日浮动盈亏"
                 )
+            elif total_value > 0:
+                self._card_today_pnl.update("--", subtitle="价格更新中…")
 
             # 持仓支数
-            self._card_positions.update(
-                str(n_pos),
-                subtitle=f"活跃持仓"
-            )
+            self._card_positions.update(str(n_pos), subtitle="活跃持仓")
 
             # 更新持仓列表
             self._populate_portfolio_list(positions)
 
         except Exception:
-            pass   # 持仓 DB 未就绪时静默
+            import traceback; traceback.print_exc()   # 调试期间打印异常
 
     def _refresh_goals(self) -> None:
         """从 goal_manager 获取目标进度"""
