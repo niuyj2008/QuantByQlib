@@ -103,19 +103,32 @@ class PortfolioPage(QWidget):
         lay.setSpacing(8)
 
         self._holdings_table = QTableWidget()
-        self._holdings_table.setColumnCount(9)
+        self._holdings_table.setColumnCount(10)
         self._holdings_table.setHorizontalHeaderLabels([
-            "股票", "股数", "均价", "现价", "市值", "盈亏$", "盈亏%", "今日", "操作"
+            "股票", "股数", "均价", "现价", "市值", "盈亏$", "盈亏%", "今日", "卖出", "分析"
         ])
         self._holdings_table.setAlternatingRowColors(True)
         self._holdings_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._holdings_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self._holdings_table.verticalHeader().setVisible(False)
+        self._holdings_table.verticalHeader().setDefaultSectionSize(44)
         self._holdings_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._holdings_table.customContextMenuRequested.connect(self._on_context_menu)
+        # 横向滚动条始终显示
+        self._holdings_table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         hdr = self._holdings_table.horizontalHeader()
-        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        hdr.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        # 所有列固定宽度，总宽约820px，超出时横向滚动
+        hdr.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        hdr.resizeSection(0, 72)   # 股票
+        hdr.resizeSection(1, 60)   # 股数
+        hdr.resizeSection(2, 90)   # 均价
+        hdr.resizeSection(3, 100)  # 现价（含*后缀）
+        hdr.resizeSection(4, 100)  # 市值
+        hdr.resizeSection(5, 100)  # 盈亏$
+        hdr.resizeSection(6, 80)   # 盈亏%
+        hdr.resizeSection(7, 80)   # 今日
+        hdr.resizeSection(8, 64)   # 卖出
+        hdr.resizeSection(9, 64)   # 分析
         lay.addWidget(self._holdings_table)
 
         self._holdings_empty = QLabel(
@@ -148,10 +161,13 @@ class PortfolioPage(QWidget):
         )
         self._trans_table.setAlternatingRowColors(True)
         self._trans_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._trans_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self._trans_table.verticalHeader().setVisible(False)
         self._trans_table.horizontalHeader().setSectionResizeMode(
             6, QHeaderView.ResizeMode.Stretch
         )
+        self._trans_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._trans_table.customContextMenuRequested.connect(self._on_trans_context_menu)
         lay.addWidget(self._trans_table)
         return w
 
@@ -190,6 +206,7 @@ class PortfolioPage(QWidget):
     # ── 数据加载 ──────────────────────────────────────────
 
     def _refresh(self) -> None:
+        first_load = not self._positions
         try:
             from portfolio.db import get_db
             db = get_db()
@@ -201,6 +218,10 @@ class PortfolioPage(QWidget):
         except Exception as e:
             from loguru import logger
             logger.warning(f"持仓数据加载失败：{e}")
+        # 首次加载完持仓数据后，延迟 800ms 自动刷新价格
+        if first_load and self._positions:
+            from PyQt6.QtCore import QTimer
+            QTimer.singleShot(800, self._on_refresh_prices)
 
     def _on_refresh_prices(self) -> None:
         if not self._positions:
@@ -231,6 +252,7 @@ class PortfolioPage(QWidget):
 
             current_price = quote.get("price")
             change_pct    = quote.get("change_pct")
+            is_extended   = quote.get("is_extended", False)
             pos = next((p for p in self._positions if p["symbol"] == symbol), None)
             if not pos or current_price is None:
                 continue
@@ -241,7 +263,10 @@ class PortfolioPage(QWidget):
             pnl        = market_val - shares * avg_cost
             pnl_pct    = pnl / (shares * avg_cost) if avg_cost > 0 else 0
 
-            self._set_cell(row, 3, fmt_price(current_price), None)
+            # 盘前/盘后价格加*标注
+            price_text = fmt_price(current_price) + ("*" if is_extended else "")
+            price_color = COLORS["warning"] if is_extended else None
+            self._set_cell(row, 3, price_text, price_color)
             self._set_cell(row, 4, fmt_price(market_val), None)
             pnl_color = COLORS["success"] if pnl >= 0 else COLORS["danger"]
             self._set_cell(row, 5, fmt_price(pnl, prefix=""), pnl_color)
@@ -271,9 +296,24 @@ class PortfolioPage(QWidget):
         self._holdings_empty.setVisible(not has_data)
         self._holdings_table.setRowCount(0)
 
+        # 按钮内联样式（覆盖全局 QPushButton padding: 8px 18px）
+        _sell_style = (
+            "QPushButton { background: qlineargradient(x1:0, y1:0, x2:1, y2:0,"
+            " stop:0 #991B1B, stop:1 #EF4444); color: white; border: none;"
+            " border-radius: 6px; padding: 4px 2px; font-size: 12px; font-weight: bold; }"
+            "QPushButton:hover { background: #DC2626; }"
+        )
+        _anal_style = (
+            "QPushButton { background: transparent; border: 1px solid #5B5BD6;"
+            " color: #5B5BD6; border-radius: 6px; padding: 4px 2px;"
+            " font-size: 12px; font-weight: bold; }"
+            "QPushButton:hover { background: #F0F1F5; }"
+        )
+
         for pos in positions:
             row = self._holdings_table.rowCount()
             self._holdings_table.insertRow(row)
+            self._holdings_table.setRowHeight(row, 44)   # 必须明确设置每行高度（44px才能保证按钮完整显示）
             sym      = pos["symbol"]
             shares   = pos["shares"]
             avg_cost = pos["avg_cost"]
@@ -281,31 +321,31 @@ class PortfolioPage(QWidget):
             self._set_cell(row, 0, sym, None, bold=True)
             self._set_cell(row, 1, fmt_shares(shares), None)
             self._set_cell(row, 2, fmt_price(avg_cost), None)
-            self._set_cell(row, 3, "--", COLORS["text_muted"])
-            self._set_cell(row, 4, fmt_price(shares * avg_cost), None)
-            self._set_cell(row, 5, "--", COLORS["text_muted"])
-            self._set_cell(row, 6, "--", COLORS["text_muted"])
-            self._set_cell(row, 7, "--", COLORS["text_muted"])
+            self._set_cell(row, 3, "--", COLORS["text_muted"])                      # 现价
+            self._set_cell(row, 4, fmt_price(shares * avg_cost), None)              # 市值（初始用成本）
+            self._set_cell(row, 5, "--", COLORS["text_muted"])                      # 盈亏$
+            self._set_cell(row, 6, "--", COLORS["text_muted"])                      # 盈亏%
+            self._set_cell(row, 7, "--", COLORS["text_muted"])                      # 今日
 
-            # 操作按钮
-            btn_w = QWidget()
-            btn_lay = QHBoxLayout(btn_w)
-            btn_lay.setContentsMargins(4, 2, 4, 2)
-            btn_lay.setSpacing(4)
-
+            # 卖出按钮（第8列）
+            sell_w = QWidget()
+            sell_lay = QHBoxLayout(sell_w)
+            sell_lay.setContentsMargins(4, 4, 4, 4)
             s_btn = QPushButton("卖出")
-            s_btn.setObjectName("btn_danger")
-            s_btn.setFixedHeight(26)
+            s_btn.setStyleSheet(_sell_style)
             s_btn.clicked.connect(lambda _, s=sym: self._on_sell(s))
-            btn_lay.addWidget(s_btn)
+            sell_lay.addWidget(s_btn)
+            self._holdings_table.setCellWidget(row, 8, sell_w)
 
+            # 分析按钮（第9列）
+            anal_w = QWidget()
+            anal_lay = QHBoxLayout(anal_w)
+            anal_lay.setContentsMargins(4, 4, 4, 4)
             d_btn = QPushButton("分析")
-            d_btn.setObjectName("btn_secondary")
-            d_btn.setFixedHeight(26)
+            d_btn.setStyleSheet(_anal_style)
             d_btn.clicked.connect(lambda _, s=sym: self._on_show_detail(s))
-            btn_lay.addWidget(d_btn)
-
-            self._holdings_table.setCellWidget(row, 8, btn_w)
+            anal_lay.addWidget(d_btn)
+            self._holdings_table.setCellWidget(row, 9, anal_w)
 
         self._holdings_summary.setText(
             f"共 {len(positions)} 个持仓" if positions else ""
@@ -324,16 +364,21 @@ class PortfolioPage(QWidget):
             ttype = t.get("trans_type", "BUY")
             color = type_colors.get(ttype, COLORS["text_muted"])
 
-            self._set_cell(row, 0, t.get("trans_date", "--"), None)
-            self._set_cell(row, 1, t.get("symbol", "--"), None, bold=True)
+            # 日期列同时存储 transaction id，用于删除操作
+            date_item = QTableWidgetItem(t.get("trans_date", "--"))
+            date_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            date_item.setData(Qt.ItemDataRole.UserRole, t.get("id"))
+            self._trans_table.setItem(row, 0, date_item)
+
+            self._set_trans_cell(row, 1, t.get("symbol", "--"), None, bold=True)
             type_item = QTableWidgetItem(type_map.get(ttype, ttype))
             type_item.setForeground(QColor(color))
             type_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self._trans_table.setItem(row, 2, type_item)
-            self._set_cell(row, 3, fmt_shares(t.get("shares")), None)
-            self._set_cell(row, 4, fmt_price(t.get("price")), None)
-            self._set_cell(row, 5, fmt_price(t.get("amount")), None)
-            self._set_cell(row, 6, t.get("notes") or "", None)
+            self._set_trans_cell(row, 3, fmt_shares(t.get("shares")), None)
+            self._set_trans_cell(row, 4, fmt_price(t.get("price")), None)
+            self._set_trans_cell(row, 5, fmt_price(t.get("amount")), None)
+            self._set_trans_cell(row, 6, t.get("notes") or "", None)
 
     def _update_metrics(self, summary: dict) -> None:
         def c(v):
@@ -481,10 +526,51 @@ class PortfolioPage(QWidget):
                     from core.event_bus import get_event_bus
                     get_event_bus().portfolio_updated.emit()
 
+    def _on_trans_context_menu(self, pos) -> None:
+        row = self._trans_table.rowAt(pos.y())
+        if row < 0:
+            return
+        date_item = self._trans_table.item(row, 0)
+        sym_item  = self._trans_table.item(row, 1)
+        type_item = self._trans_table.item(row, 2)
+        if not date_item:
+            return
+
+        trans_id   = date_item.data(Qt.ItemDataRole.UserRole)
+        trans_date = date_item.text()
+        symbol     = sym_item.text() if sym_item else "--"
+        trans_type = type_item.text() if type_item else "--"
+
+        menu = QMenu(self)
+        del_act = menu.addAction(f"🗑 删除此条记录（{trans_date} {symbol} {trans_type}）")
+        action = menu.exec(self._trans_table.viewport().mapToGlobal(pos))
+
+        if action == del_act:
+            if trans_id is None:
+                QMessageBox.warning(self, "无法删除", "该记录缺少 ID，无法删除。")
+                return
+            ret = QMessageBox.question(
+                self, "确认删除交易记录",
+                f"确定删除以下交易记录？\n\n"
+                f"日期：{trans_date}\n股票：{symbol}\n类型：{trans_type}\n\n"
+                "⚠ 此操作仅删除记录，不会自动调整持仓数量。",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if ret == QMessageBox.StandardButton.Yes:
+                try:
+                    from portfolio.db import get_db
+                    get_db().delete_transaction(trans_id)
+                    from core.event_bus import get_event_bus
+                    get_event_bus().portfolio_updated.emit()
+                except Exception as e:
+                    QMessageBox.critical(self, "删除失败", str(e))
+
     def _set_cell(self, row: int, col: int, text: str,
                   color: Optional[str], bold: bool = False) -> None:
         item = QTableWidgetItem(text)
         item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        item.setToolTip(text)   # 悬停时显示完整内容
         if color:
             item.setForeground(QColor(color))
         if bold:
@@ -492,3 +578,15 @@ class PortfolioPage(QWidget):
             item.setFont(f)
             item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self._holdings_table.setItem(row, col, item)
+
+    def _set_trans_cell(self, row: int, col: int, text: str,
+                        color: Optional[str], bold: bool = False) -> None:
+        item = QTableWidgetItem(text)
+        item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        item.setToolTip(text)   # 悬停时显示完整内容
+        if color:
+            item.setForeground(QColor(color))
+        if bold:
+            f = QFont(); f.setBold(True)
+            item.setFont(f)
+        self._trans_table.setItem(row, col, item)

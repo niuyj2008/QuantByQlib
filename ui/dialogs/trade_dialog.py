@@ -12,7 +12,8 @@ from typing import Literal
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel,
     QLineEdit, QPushButton, QDoubleSpinBox,
-    QDateEdit, QTextEdit, QFrame, QMessageBox
+    QDateEdit, QTextEdit, QFrame, QMessageBox,
+    QScrollArea, QWidget, QSizePolicy
 )
 from PyQt6.QtCore import Qt, QDate
 from PyQt6.QtGui import QFont
@@ -42,15 +43,27 @@ class TradeDialog(QDialog):
         self._setup_ui(ticker)
 
     def _setup_ui(self, ticker: str) -> None:
-        layout = QVBoxLayout(self)
-        layout.setSpacing(12)
-        layout.setContentsMargins(20, 20, 20, 20)
+        # 外层主布局：滚动区 + 固定按钮行
+        main_layout = QVBoxLayout(self)
+        main_layout.setSpacing(0)
+        main_layout.setContentsMargins(0, 0, 0, 12)
 
-        # ── 标题 ─────────────────────────────────────────
         is_buy = self.trade_type == "buy"
         color = COLORS["success"] if is_buy else COLORS["danger"]
         icon = "📈 买入" if is_buy else "📉 卖出"
 
+        # ── 滚动区包裹所有表单字段 ────────────────────────
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+        form_widget = QWidget()
+        layout = QVBoxLayout(form_widget)
+        layout.setSpacing(12)
+        layout.setContentsMargins(20, 20, 20, 12)
+
+        # ── 标题 ─────────────────────────────────────────
         header = QLabel(icon)
         font = QFont()
         font.setPointSize(16)
@@ -141,9 +154,23 @@ class TradeDialog(QDialog):
         preview_layout.addWidget(self._preview_sub)
 
         layout.addWidget(self._preview_card)
+        layout.addStretch()
 
-        # ── 按钮行 ────────────────────────────────────────
+        scroll.setWidget(form_widget)
+        main_layout.addWidget(scroll, 1)
+
+        # ── 按钮行（固定在对话框底部，不随滚动移动）────────
+        btn_container = QWidget()
+        btn_container_layout = QVBoxLayout(btn_container)
+        btn_container_layout.setContentsMargins(20, 8, 20, 0)
+        btn_container_layout.setSpacing(0)
+
+        btn_sep = QFrame()
+        btn_sep.setFrameShape(QFrame.Shape.HLine)
+        btn_container_layout.addWidget(btn_sep)
+
         btn_row = QHBoxLayout()
+        btn_row.setContentsMargins(0, 8, 0, 0)
         cancel_btn = QPushButton("取消")
         cancel_btn.setObjectName("btn_secondary")
         cancel_btn.setMinimumHeight(38)
@@ -158,7 +185,16 @@ class TradeDialog(QDialog):
         self._confirm_btn.clicked.connect(self._on_confirm)
         btn_row.addWidget(self._confirm_btn)
 
-        layout.addLayout(btn_row)
+        btn_container_layout.addLayout(btn_row)
+        main_layout.addWidget(btn_container)
+
+        # 限制对话框最大高度为屏幕可用高度的 85%
+        from PyQt6.QtWidgets import QApplication
+        screen = QApplication.primaryScreen()
+        if screen:
+            available_h = screen.availableGeometry().height()
+            self.setMaximumHeight(int(available_h * 0.85))
+
         self._update_preview()
 
     def _label(self, text: str) -> QLabel:

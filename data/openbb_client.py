@@ -117,170 +117,228 @@ def get_latest_quote(ticker: str) -> Optional[dict]:
     return None
 
 
+def _get_realtime_quote_yf(ticker: str) -> Optional[dict]:
+    """
+    用 yfinance 获取单只股票的最新价格（含盘前/盘中/盘后）
+    使用 history(interval="1m", prepost=True) 取最新1分钟K线收盘价，无缓存延迟
+    涨跌幅基准：上一个交易日收盘价（fast_info.previous_close）
+    """
+    try:
+        import yfinance as yf
+        import pytz
+        t = yf.Ticker(ticker)
+
+        # 1分钟K线含盘前/盘后，取最后一条即为最新成交价
+        hist = t.history(period="1d", interval="1m", prepost=True)
+        if hist.empty:
+            return None
+        last_price = float(hist["Close"].iloc[-1])
+        if last_price != last_price:  # NaN check
+            return None
+
+        # 判断是否处于盘外时段（盘前04:00-09:30 或 盘后16:00-20:00 美东）
+        last_ts = hist.index[-1]
+        try:
+            et = pytz.timezone("America/New_York")
+            last_et = last_ts.astimezone(et)
+            h, m = last_et.hour, last_et.minute
+            in_regular = (h == 9 and m >= 30) or (10 <= h < 16)
+            is_extended = not in_regular
+        except Exception:
+            is_extended = False
+
+        # 上一交易日收盘价用于涨跌幅计算
+        prev_close = getattr(t.fast_info, "previous_close", None)
+        change_pct = None
+        if prev_close and prev_close > 0:
+            change_pct = (last_price - float(prev_close)) / float(prev_close) * 100
+
+        return {
+            "price":       last_price,
+            "change_pct":  change_pct,
+            "is_extended": is_extended,
+        }
+    except Exception:
+        return None
+
+
 def get_batch_quotes(tickers: list[str]) -> dict[str, Optional[dict]]:
     """
-    批量获取多只股票的最新报价
-    返回 {ticker: quote_dict or None}
+    批量获取多只股票的实时报价（含盘前/盘中/盘后）
+    使用 yfinance fast_info 多线程并发，无需 API Key
+    返回 {ticker: {price, change_pct} or None}
     """
-    results = {}
-    for ticker in tickers:
-        results[ticker] = get_latest_quote(ticker)
-    return results
+    if not tickers:
+        return {}
+    try:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        results: dict[str, Optional[dict]] = {}
+        with ThreadPoolExecutor(max_workers=min(len(tickers), 8)) as executor:
+            future_to_ticker = {
+                executor.submit(_get_realtime_quote_yf, t): t for t in tickers
+            }
+            for future in as_completed(future_to_ticker):
+                t = future_to_ticker[future]
+                try:
+                    results[t] = future.result()
+                except Exception:
+                    results[t] = None
+        ok = sum(1 for v in results.values() if v)
+        logger.debug(f"yfinance 实时报价完成：{ok}/{len(tickers)} 支有数据")
+        return results
+    except Exception as e:
+        logger.warning(f"yfinance 批量报价失败，回退逐个 OpenBB：{e}")
+        result = {}
+        for ticker in tickers:
+            result[ticker] = get_latest_quote(ticker)
+        return result
+
+
+# ── Finnhub 直接调用工具 ──────────────────────────────────────
+
+def _finnhub_get(path: str, params: dict) -> Optional[dict]:
+    """调用 Finnhub REST API，返回 JSON dict 或 None"""
+    key = os.environ.get("FINNHUB_API_KEY", "")
+    if not key:
+        return None
+    try:
+        import requests
+        params["token"] = key
+        r = requests.get(f"https://finnhub.io/api/v1{path}", params=params, timeout=10)
+        if r.status_code == 200:
+            return r.json()
+    except Exception as e:
+        logger.debug(f"Finnhub {path} 失败：{e}")
+    return None
 
 
 # ── 基本面数据 ────────────────────────────────────────────────
 
 def get_fundamental_metrics(ticker: str) -> Optional[dict]:
     """
-    获取基本面指标（PE/PB/市值/ROE 等）via FMP
+    获取基本面指标（PE/PB/市值/ROE 等）via Finnhub basic financials
     返回 dict 或 None
     """
-    obb = _get_obb()
-    if obb is None:
+    data = _finnhub_get("/stock/metric", {"symbol": ticker, "metric": "all"})
+    if not data or "metric" not in data:
         return None
-
-    try:
-        result = obb.equity.fundamental.metrics(
-            symbol=ticker,
-            provider="fmp",
-            period="annual",
-            limit=1,
-        )
-        if result and result.results:
-            row = result.to_dataframe().iloc[0]
-            return {
-                "pe_ratio":        _safe_float(row, ["pe_ratio", "pe"]),
-                "pb_ratio":        _safe_float(row, ["pb_ratio", "pb"]),
-                "ps_ratio":        _safe_float(row, ["ps_ratio", "ps"]),
-                "roe":             _safe_float(row, ["return_on_equity", "roe"]),
-                "roa":             _safe_float(row, ["return_on_assets", "roa"]),
-                "debt_to_equity":  _safe_float(row, ["debt_to_equity"]),
-                "current_ratio":   _safe_float(row, ["current_ratio"]),
-                "revenue_growth":  _safe_float(row, ["revenue_growth"]),
-                "eps_growth":      _safe_float(row, ["eps_growth"]),
-                "gross_margin":    _safe_float(row, ["gross_profit_margin", "gross_margin"]),
-                "operating_margin":_safe_float(row, ["operating_profit_margin", "operating_margin"]),
-                "net_margin":      _safe_float(row, ["net_profit_margin", "net_margin"]),
-            }
-    except Exception as e:
-        logger.debug(f"基本面指标 {ticker} 失败：{e}")
-
-    return None
+    m = data["metric"]
+    def _f(key):
+        v = m.get(key)
+        try:
+            return float(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+    return {
+        "pe_ratio":         _f("peNormalizedAnnual") or _f("peTTM"),
+        "pb_ratio":         _f("pbQuarterly") or _f("pbAnnual"),
+        "ps_ratio":         _f("psTTM"),
+        "roe":              _f("roeTTM"),
+        "roa":              _f("roaTTM"),
+        "debt_to_equity":   _f("totalDebt/totalEquityAnnual"),
+        "current_ratio":    _f("currentRatioQuarterly") or _f("currentRatioAnnual"),
+        "revenue_growth":   _f("revenueGrowthTTMYoy"),
+        "eps_growth":       _f("epsGrowthTTMYoy"),
+        "gross_margin":     _f("grossMarginTTM"),
+        "operating_margin": _f("operatingMarginTTM"),
+        "net_margin":       _f("netProfitMarginTTM"),
+    }
 
 
 def get_company_profile(ticker: str) -> Optional[dict]:
     """
-    获取公司概况（名称/行业/市值/描述/分析师目标价）via FMP
+    获取公司概况（名称/行业/市值/描述/分析师目标价）via Finnhub
     返回 dict 或 None
     """
-    obb = _get_obb()
-    if obb is None:
+    data = _finnhub_get("/stock/profile2", {"symbol": ticker})
+    if not data or not data.get("name"):
         return None
 
-    profile = None
-    try:
-        result = obb.equity.profile(symbol=ticker, provider="fmp")
-        if result and result.results:
-            row = result.to_dataframe().iloc[0]
-            profile = {
-                "name":        _safe_str(row, ["long_name", "name", "company_name"]),
-                "sector":      _safe_str(row, ["sector"]),
-                "industry":    _safe_str(row, ["industry"]),
-                "market_cap":  _safe_float(row, ["market_cap"]),
-                "description": _safe_str(row, ["description", "long_business_summary"]),
-                "employees":   _safe_float(row, ["full_time_employees"]),
-                "country":     _safe_str(row, ["country"]),
-                "website":     _safe_str(row, ["website"]),
-                "exchange":    _safe_str(row, ["exchange"]),
-            }
-    except Exception as e:
-        logger.debug(f"公司概况 {ticker} 失败：{e}")
+    profile: dict = {
+        "name":        data.get("name"),
+        "sector":      data.get("finnhubIndustry"),
+        "industry":    data.get("finnhubIndustry"),
+        "market_cap":  data.get("marketCapitalization"),  # 单位：百万美元
+        "description": None,
+        "employees":   data.get("employeeTotal"),
+        "country":     data.get("country"),
+        "website":     data.get("weburl"),
+        "exchange":    data.get("exchange"),
+    }
 
-    # 追加分析师目标价
-    try:
-        pt_result = obb.equity.estimates.price_target(symbol=ticker, provider="fmp")
-        if pt_result and pt_result.results:
-            pt_row = pt_result.to_dataframe().iloc[0]
-            if profile is None:
-                profile = {}
-            profile["analyst_target"] = _safe_float(pt_row, ["price_target", "target_price"])
-            profile["analyst_rating"] = _safe_str(pt_row, ["rating", "consensus"])
-    except Exception as e:
-        logger.debug(f"分析师目标价 {ticker} 失败：{e}")
+    # 分析师目标价
+    pt_data = _finnhub_get("/stock/price-target", {"symbol": ticker})
+    if pt_data:
+        profile["analyst_target"] = pt_data.get("targetMean")
+        profile["analyst_rating"] = pt_data.get("targetMean")  # Finnhub 无直接 rating 字符串
+
+    # 分析师推荐趋势（取最新一期）
+    rec_data = _finnhub_get("/stock/recommendation", {"symbol": ticker})
+    if isinstance(rec_data, list) and rec_data:
+        latest = rec_data[0]
+        buy   = (latest.get("buy", 0) or 0) + (latest.get("strongBuy", 0) or 0)
+        sell  = (latest.get("sell", 0) or 0) + (latest.get("strongSell", 0) or 0)
+        hold  = latest.get("hold", 0) or 0
+        total = buy + sell + hold
+        if total > 0:
+            if buy / total >= 0.6:
+                profile["analyst_rating"] = "买入"
+            elif sell / total >= 0.4:
+                profile["analyst_rating"] = "卖出"
+            else:
+                profile["analyst_rating"] = "持有"
 
     return profile
 
 
 def get_earnings_history(ticker: str, limit: int = 8) -> Optional[list[dict]]:
     """
-    获取历史 EPS 实际/预期对比 via FMP
+    获取历史 EPS 实际/预期对比 via Finnhub earnings surprises
     返回 list[dict] 或 None
     """
-    obb = _get_obb()
-    if obb is None:
+    data = _finnhub_get("/stock/earnings", {"symbol": ticker})
+    if not isinstance(data, list) or not data:
         return None
-
-    try:
-        result = obb.equity.fundamental.earnings(
-            symbol=ticker,
-            provider="fmp",
-            limit=limit,
-        )
-        if result and result.results:
-            df = result.to_dataframe()
-            records = []
-            for _, row in df.iterrows():
-                records.append({
-                    "date":          str(row.get("date", "--")),
-                    "eps_actual":    _safe_float(row, ["eps_actual", "actual_eps"]),
-                    "eps_estimated": _safe_float(row, ["eps_estimated", "estimated_eps"]),
-                    "revenue_actual":    _safe_float(row, ["revenue_actual"]),
-                    "revenue_estimated": _safe_float(row, ["revenue_estimated"]),
-                })
-            return records
-    except Exception as e:
-        logger.debug(f"EPS 历史 {ticker} 失败：{e}")
-
-    return None
+    records = []
+    for item in data[:limit]:
+        records.append({
+            "date":              item.get("period", "--"),
+            "eps_actual":        item.get("actual"),
+            "eps_estimated":     item.get("estimate"),
+            "revenue_actual":    None,
+            "revenue_estimated": None,
+        })
+    return records
 
 
 # ── 新闻与情绪 ────────────────────────────────────────────────
 
 def get_news(ticker: str, limit: int = 20) -> list[dict]:
     """
-    获取个股新闻 via Finnhub
-    返回 list[dict]，失败返回空列表（不返回 None）
-    每条包含：headline / summary / url / datetime / sentiment_source
+    获取个股新闻 via Finnhub company-news（直接 REST，无需 OpenBB）
+    返回 list[dict]，失败返回空列表
     """
-    obb = _get_obb()
-    if obb is None:
+    from datetime import date, timedelta
+    today = date.today().isoformat()
+    week_ago = (date.today() - timedelta(days=7)).isoformat()
+
+    data = _finnhub_get("/company-news", {
+        "symbol": ticker, "from": week_ago, "to": today
+    })
+    if not isinstance(data, list):
         return []
 
-    for provider in ["fmp", "tiingo", "benzinga"]:
-        try:
-            result = obb.news.company(
-                symbol=ticker,
-                provider=provider,
-                limit=limit,
-            )
-            if result and result.results:
-                df = result.to_dataframe()
-                records = []
-                for _, row in df.iterrows():
-                    records.append({
-                        "headline": _safe_str(row, ["headline", "title", "text"]),
-                        "summary":  _safe_str(row, ["summary", "description", "body"]),
-                        "url":      _safe_str(row, ["url", "link"]),
-                        "datetime": str(row.get("date", row.get("published_utc", "--"))),
-                        "source":   _safe_str(row, ["source", "publisher"]),
-                    })
-                logger.debug(f"新闻 {ticker} 来自 {provider}，共 {len(records)} 条")
-                return records
-        except Exception as e:
-            logger.debug(f"新闻 provider {provider} 失败：{e}")
-            continue
-
-    return []
+    records = []
+    for item in data[:limit]:
+        records.append({
+            "headline": item.get("headline", ""),
+            "summary":  item.get("summary", ""),
+            "url":      item.get("url", ""),
+            "datetime": str(item.get("datetime", "--")),
+            "source":   item.get("source", ""),
+        })
+    logger.debug(f"Finnhub 新闻 {ticker}：{len(records)} 条")
+    return records
 
 
 # ── 期权数据 ──────────────────────────────────────────────────

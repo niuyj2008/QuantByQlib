@@ -244,6 +244,12 @@ class PortfolioDatabase:
             conn.execute("DELETE FROM positions WHERE symbol = ?", (symbol,))
         logger.warning(f"已直接删除持仓记录：{symbol}（非卖出操作）")
 
+    def delete_transaction(self, transaction_id: int) -> None:
+        """删除单条交易记录（用于纠错，不影响持仓数据）"""
+        with self._conn() as conn:
+            conn.execute("DELETE FROM transactions WHERE id = ?", (transaction_id,))
+        logger.warning(f"已直接删除交易记录：id={transaction_id}（纠错操作）")
+
     # ── 交易记录操作 ──────────────────────────────────────────
 
     def get_transactions(self, symbol: Optional[str] = None, limit: int = 200) -> list[dict]:
