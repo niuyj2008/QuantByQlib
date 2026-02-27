@@ -225,12 +225,17 @@ class YFinanceCollectorWorker(QRunnable):
             return []
 
     def _extend_calendar(self, new_dates: list[date]) -> None:
-        """将新交易日追加到 calendars/day.txt"""
+        """将新交易日追加到 calendars/day.txt（自动去重）"""
         cal_file = QLIB_DATA_DIR / "calendars" / "day.txt"
         if not cal_file.exists():
             return
+        # 读取已有日期集合，避免写入重复行
+        existing = set(cal_file.read_text().strip().split("\n"))
+        to_write = [d for d in new_dates if d.strftime("%Y-%m-%d") not in existing]
+        if not to_write:
+            return
         with cal_file.open("a", encoding="utf-8") as f:
-            for d in new_dates:
+            for d in to_write:
                 f.write(f"\n{d.strftime('%Y-%m-%d')}")
 
     # ── 股票列表 ─────────────────────────────────────────────
