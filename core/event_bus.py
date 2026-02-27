@@ -47,6 +47,7 @@ class EventBus(QObject):
     rdagent_completed = pyqtSignal(list)             # 参数: 发现的因子列表
     rdagent_failed = pyqtSignal(str)                 # 参数: 错误信息
     rdagent_stopped = pyqtSignal()
+    rdagent_factors_injected = pyqtSignal(list)      # 参数: 通过验证的因子表达式 list[str]
 
     # ── 导航事件 ─────────────────────────────────────────────
     navigate_to = pyqtSignal(str)                    # 参数: 页面名称

@@ -11,7 +11,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QTextEdit, QFrame, QGridLayout,
     QTableWidget, QTableWidgetItem, QHeaderView,
-    QSplitter, QProgressBar,
+    QSplitter, QProgressBar, QSizePolicy,
 )
 from PyQt6.QtCore import Qt, QThreadPool, QTimer
 from PyQt6.QtGui import QColor, QFont
@@ -171,6 +171,41 @@ class FactorPage(QWidget):
         ff_layout.addWidget(self._factor_empty)
         self._factor_table.hide()
 
+        # ── 注入选股策略区域 ──
+        inject_sep = QFrame()
+        inject_sep.setFrameShape(QFrame.Shape.HLine)
+        inject_sep.setStyleSheet(f"color:{COLORS['border']};")
+        ff_layout.addWidget(inject_sep)
+
+        inject_row = QHBoxLayout()
+        self._inject_btn = QPushButton("✅ 注入选股策略")
+        self._inject_btn.setMinimumHeight(32)
+        self._inject_btn.setEnabled(False)
+        self._inject_btn.setToolTip(
+            "对 RD-Agent 发现的因子进行 IC 验证（IC ≥ 0.03），\n"
+            "将通过验证的因子注入 LightGBM 选股策略，并清除旧缓存"
+        )
+        self._inject_btn.clicked.connect(self._on_inject)
+        inject_row.addWidget(self._inject_btn)
+        ff_layout.addLayout(inject_row)
+
+        # 注入进度条（验证期间显示）
+        self._inject_progress = QProgressBar()
+        self._inject_progress.setRange(0, 100)
+        self._inject_progress.setTextVisible(True)
+        self._inject_progress.setFixedHeight(18)
+        self._inject_progress.hide()
+        ff_layout.addWidget(self._inject_progress)
+
+        # 注入状态标签（显示最近一次注入结果）
+        self._inject_status_lbl = QLabel("")
+        self._inject_status_lbl.setWordWrap(True)
+        self._inject_status_lbl.setStyleSheet("font-size:11px; padding: 2px 4px;")
+        ff_layout.addWidget(self._inject_status_lbl)
+
+        # 初始化时读取已有注入状态
+        QTimer.singleShot(500, self._refresh_inject_status)
+
         splitter.addWidget(factor_frame)
         splitter.setSizes([600, 400])
 
@@ -295,6 +330,7 @@ class FactorPage(QWidget):
         self._append_log(f"[INFO] ✅ 因子发现完成，共 {len(factors)} 个")
         self._populate_factor_table(factors)
         self._export_factors_btn.setEnabled(bool(factors))
+        self._inject_btn.setEnabled(bool(factors))
         self._check_docker_status()
 
     def _on_failed(self, err: str) -> None:
@@ -363,6 +399,83 @@ class FactorPage(QWidget):
             sharpe_item = QTableWidgetItem(f"{sharpe:.2f}" if sharpe is not None else "--")
             sharpe_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self._factor_table.setItem(row, 3, sharpe_item)
+
+    # ── 因子注入 ──────────────────────────────────────────────
+
+    def _on_inject(self) -> None:
+        """启动 FactorInjectWorker，后台执行 IC 验证 + 持久化"""
+        from workers.factor_inject_worker import FactorInjectWorker
+        self._inject_worker = FactorInjectWorker(min_ic=0.03)
+        self._inject_worker.signals.progress.connect(self._on_inject_progress)
+        self._inject_worker.signals.completed.connect(self._on_inject_completed)
+        self._inject_worker.signals.error.connect(self._on_inject_error)
+
+        self._inject_btn.setEnabled(False)
+        self._inject_btn.setText("⏳ 验证中...")
+        self._inject_progress.setValue(0)
+        self._inject_progress.show()
+        self._inject_status_lbl.setText("")
+
+        QThreadPool.globalInstance().start(self._inject_worker)
+
+    def _on_inject_progress(self, pct: int, msg: str) -> None:
+        self._inject_progress.setValue(pct)
+        self._inject_progress.setFormat(f"{msg[:50]}  {pct}%")
+
+    def _on_inject_completed(self, valid_exprs: list) -> None:
+        self._inject_progress.hide()
+        self._inject_btn.setEnabled(True)
+        self._inject_btn.setText("✅ 注入选股策略")
+
+        n = len(valid_exprs)
+        if n > 0:
+            preview = "、".join(e[:25] for e in valid_exprs[:3])
+            if n > 3:
+                preview += f" 等 {n} 个"
+            color_ok = COLORS["success"]
+            self._inject_status_lbl.setText(
+                f"<span style='color:{color_ok};'>"
+                f"&#x2705; 已注入 {n} 个因子，下次选股将自动使用<br/>"
+                f"<small>{preview}</small></span>"
+            )
+        else:
+            color_warn = COLORS["warning"]
+            self._inject_status_lbl.setText(
+                f"<span style='color:{color_warn};'>"
+                f"&#x26A0; 无因子通过 IC 验证（阈值 0.03），策略保持不变</span>"
+            )
+
+    def _on_inject_error(self, err: str) -> None:
+        self._inject_progress.hide()
+        self._inject_btn.setEnabled(True)
+        self._inject_btn.setText("✅ 注入选股策略")
+        color_err = COLORS["danger"]
+        self._inject_status_lbl.setText(
+            f"<span style='color:{color_err};'>&#x274C; 注入失败：{err[:80]}</span>"
+        )
+
+    def _refresh_inject_status(self) -> None:
+        """页面加载时读取已有注入状态并展示"""
+        try:
+            from strategies.factor_injector import get_inject_status
+            status = get_inject_status()
+            if status.get("injected") and status.get("count", 0) > 0:
+                n     = status["count"]
+                ts    = status.get("updated_at", "")[:16]
+                age_h = status.get("age_hours", 0)
+                exprs = status.get("expressions", [])
+                preview = "、".join(e[:25] for e in exprs[:2])
+                if n > 2:
+                    preview += f" 等 {n} 个"
+                age_str = f"{age_h:.1f}h 前" if age_h < 48 else f"{int(age_h/24)}天前"
+                color_muted = COLORS["text_muted"]
+                self._inject_status_lbl.setText(
+                    f"<span style='color:{color_muted};'>"
+                    f"上次注入（{ts}，{age_str}）：{preview}</span>"
+                )
+                # 已有注入记录时，也允许手动触发重新注入（因子表格有数据才启用）
+        except Exception:
+            pass
 
     def _on_export_factors(self) -> None:
         """导出因子到 CSV"""

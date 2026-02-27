@@ -468,6 +468,102 @@ def _patch_pytorch_model_best_param(model) -> None:
     model.predict = types.MethodType(patched_predict, model)
 
 
+def _fit_with_extra_factors(model, dataset, extra_exprs: list[str],
+                            universe_qlib: list[str],
+                            train_start_s: str, pred_end_s: str) -> None:
+    """
+    将 RD-Agent 发现的自定义因子注入 LGBModel 训练（仅支持 LightGBM）。
+    通过 D.features() 计算自定义因子 DataFrame，与 Alpha158 输出 concat 后
+    直接调用 model.fit()（LGBModel.fit 接受 dataset，通过 prepare() 获取数据）。
+
+    实现策略：
+      1. 调用 model.fit(dataset) 使用标准 Alpha158 特征（原有路径）
+      2. 同时用 D.features() 加载自定义因子，追加到 LGB 的 train_x 中
+      3. 由于 LGBModel.fit() 内部调用 dataset.prepare()，
+         此处通过 monkey-patch dataset 的 prepare 方法在返回数据时追加列。
+    """
+    from qlib.data import D
+    import numpy as np
+
+    # 加载自定义因子数据
+    try:
+        custom_df = D.features(
+            universe_qlib, extra_exprs,
+            start_time=train_start_s, end_time=pred_end_s,
+            freq="day",
+        )
+    except Exception as e:
+        logger.warning(f"[因子注入] D.features 加载自定义因子失败：{e}，跳过注入")
+        model.fit(dataset)
+        return
+
+    if custom_df is None or custom_df.empty:
+        logger.warning("[因子注入] 自定义因子数据为空，跳过注入")
+        model.fit(dataset)
+        return
+
+    # 重命名列，避免与 Alpha158 特征名冲突
+    custom_df.columns = [f"_extra_{i}" for i in range(len(custom_df.columns))]
+    logger.info(f"[因子注入] 加载 {len(extra_exprs)} 个自定义因子，"
+                f"shape={custom_df.shape}，追加到 LGBModel 训练特征")
+
+    # Monkey-patch dataset.prepare，在返回 feature 数据时追加自定义因子列
+    original_prepare = dataset.prepare
+
+    def patched_prepare(segments, col_set=None, data_key=None, **kwargs):
+        result = original_prepare(segments, col_set=col_set, data_key=data_key, **kwargs)
+        # 只对 feature 数据追加列
+        should_concat = False
+        if col_set is None or col_set == "feature":
+            should_concat = True
+        if isinstance(col_set, list) and "feature" in col_set:
+            should_concat = True
+
+        if not should_concat or result is None:
+            return result
+
+        try:
+            if isinstance(result, dict):
+                # segments 是 list（如 ["train","valid","test"]）
+                new_result = {}
+                for seg, df in result.items():
+                    try:
+                        feat_df = df["feature"] if "feature" in df.columns.get_level_values(0) else df
+                        extra_aligned = custom_df.reindex(feat_df.index)
+                        extra_aligned.columns = pd.MultiIndex.from_tuples(
+                            [("feature", c) for c in extra_aligned.columns]
+                        )
+                        new_result[seg] = pd.concat([df, extra_aligned], axis=1)
+                    except Exception:
+                        new_result[seg] = df
+                return new_result
+            elif isinstance(result, pd.DataFrame):
+                # 单个 segment
+                try:
+                    if isinstance(result.columns, pd.MultiIndex):
+                        extra_aligned = custom_df.reindex(result.index)
+                        extra_aligned.columns = pd.MultiIndex.from_tuples(
+                            [("feature", c) for c in extra_aligned.columns]
+                        )
+                        return pd.concat([result, extra_aligned], axis=1)
+                    else:
+                        extra_aligned = custom_df.reindex(result.index)
+                        return pd.concat([result, extra_aligned], axis=1)
+                except Exception:
+                    return result
+        except Exception as e:
+            logger.debug(f"[因子注入] concat 失败：{e}，返回原始数据")
+        return result
+
+    dataset.prepare = patched_prepare
+
+    try:
+        model.fit(dataset)
+    finally:
+        # 恢复原始 prepare
+        dataset.prepare = original_prepare
+
+
 def _run_with_qlib_or_fallback(
     strategy_key: str,
     strategy_name: str,
@@ -482,6 +578,8 @@ def _run_with_qlib_or_fallback(
     """
     先尝试 Qlib 模型，若数据不足自动切换为 yfinance 规则打分
     训练结果缓存 24 小时，避免重复训练
+    自动加载 RD-Agent 发现的自定义因子（~/.quantbyqlib/valid_factors.json），
+    注入 LightGBM 训练特征，并将因子 hash 纳入缓存键。
     """
     from strategies.model_cache import cache_key, load_scores, save_scores
 
@@ -508,8 +606,21 @@ def _run_with_qlib_or_fallback(
             universe, strategy_key, strategy_name, topk, progress_cb
         )
 
-    # 检查缓存
-    key = cache_key(strategy_key, universe, data_end)
+    # 加载 RD-Agent 发现的自定义因子（LightGBM only）
+    extra_exprs: list[str] = []
+    is_lgb = "lgb" in strategy_key.lower() or strategy_key in ("growth_stocks", "market_adaptive")
+    if is_lgb:
+        try:
+            from strategies.factor_injector import load_valid_factors
+            extra_exprs = load_valid_factors()
+            if extra_exprs:
+                logger.info(f"[{strategy_key}] 加载 {len(extra_exprs)} 个自定义因子")
+                cb(5, f"已加载 {len(extra_exprs)} 个 RD-Agent 自定义因子...")
+        except Exception as e:
+            logger.debug(f"[{strategy_key}] 加载自定义因子失败（忽略）：{e}")
+
+    # 检查缓存（缓存键含自定义因子 hash，确保因子变化时自动失效）
+    key = cache_key(strategy_key, universe, data_end, extra_exprs or None)
     cached = load_scores(key)
     if cached is not None:
         cb(95, f"命中缓存（{strategy_name}），直接返回结果...")
@@ -529,7 +640,28 @@ def _run_with_qlib_or_fallback(
         model = model_factory()
         # 应用 Qlib 0.9.7 best_param bug 修复
         _patch_pytorch_model_best_param(model)
-        model.fit(dataset)
+
+        # LightGBM：若有自定义因子则注入训练特征
+        if extra_exprs and is_lgb:
+            cb(32, f"注入 {len(extra_exprs)} 个自定义因子到训练特征...")
+            universe_qlib = [t.lower() for t in universe]
+            data_end_obj = _get_qlib_data_end_date()
+            anchor = data_end_obj
+            valid_days = max(pred_days, 20)
+            test_days  = max(pred_days, 10)
+            from datetime import timedelta as _td
+            pred_end    = anchor
+            test_start  = anchor - _td(days=int(test_days * 1.5))
+            valid_start = test_start - _td(days=int(valid_days * 1.5))
+            train_start = valid_start - _td(days=int(train_days * 1.5))
+            _fit_with_extra_factors(
+                model, dataset, extra_exprs,
+                universe_qlib,
+                train_start.isoformat(), pred_end.isoformat(),
+            )
+        else:
+            model.fit(dataset)
+
         cb(75, "生成预测分数...")
         pred = model.predict(dataset, segment="test")
 

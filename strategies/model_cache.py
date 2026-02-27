@@ -17,15 +17,18 @@ from loguru import logger
 CACHE_DIR = Path.home() / ".quantbyqlib" / "model_cache"
 
 
-def cache_key(strategy_key: str, universe: list[str], data_end: object) -> str:
+def cache_key(strategy_key: str, universe: list[str], data_end: object,
+              extra_exprs: Optional[list[str]] = None) -> str:
     """
     生成缓存键（md5 前12位）
     strategy_key: 策略标识
     universe: 股票池列表（排序后 hash）
     data_end: Qlib 数据最新日期（date 对象或字符串）
+    extra_exprs: 自定义因子表达式列表（注入时加入 hash，确保因子变化时缓存失效）
     """
     universe_str = ",".join(sorted(universe))
-    raw = f"{strategy_key}|{universe_str}|{data_end}"
+    extra_str = "|extra:" + ",".join(sorted(extra_exprs)) if extra_exprs else ""
+    raw = f"{strategy_key}|{universe_str}|{data_end}{extra_str}"
     return hashlib.md5(raw.encode()).hexdigest()[:12]
 
 
