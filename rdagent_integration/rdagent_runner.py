@@ -145,22 +145,32 @@ class RDAgentRunner:
         if status == "exited":
             # 优先从结果 JSON 文件读取结构化因子
             result_file = self._workspace / "discovered_factors.json"
+            factors = []
             if result_file.exists():
                 try:
                     import json
                     data = json.loads(result_file.read_text())
                     factors = data.get("factors", [])
                     self._log_cb(f"[INFO] 因子发现完成，共发现 {len(factors)} 个因子")
-                    if self._done_cb:
-                        self._done_cb(factors)
-                    return
                 except Exception as e:
                     self._log_cb(f"[WARN] 读取结果 JSON 失败：{e}，回退到日志解析")
+                    factors = discovered_factors
+            else:
+                # 回退：使用日志行中解析的原始记录
+                factors = discovered_factors
+                self._log_cb(f"[INFO] 因子发现完成，共解析 {len(factors)} 条因子记录")
 
-            # 回退：使用日志行中解析的原始记录
-            self._log_cb(f"[INFO] 因子发现完成，共解析 {len(discovered_factors)} 条因子记录")
+            # 持久化到 session_manager（供后续注入和历史查看使用）
+            if factors:
+                try:
+                    from rdagent_integration.session_manager import get_session_manager
+                    get_session_manager().add_session(factors)
+                    self._log_cb(f"[INFO] 已记录本次会话（{len(factors)} 个因子）")
+                except Exception as e:
+                    self._log_cb(f"[WARN] 会话记录失败：{e}")
+
             if self._done_cb:
-                self._done_cb(discovered_factors)
+                self._done_cb(factors)
         else:
             err = f"容器异常退出，状态：{status}"
             self._log_cb(f"[ERROR] {err}")

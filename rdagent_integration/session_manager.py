@@ -39,17 +39,26 @@ class SessionManager:
             pass
 
     def add_session(self, factors: list, status: str = "completed") -> dict:
-        """记录一次因子发现会话"""
+        """记录一次因子发现会话，保留所有字段（name/expression/description/ic_mean 等）"""
+        def _to_dict(f) -> dict:
+            if hasattr(f, "__dict__"):          # dataclass / object
+                d = {k: v for k, v in vars(f).items()}
+            elif isinstance(f, dict):
+                d = dict(f)
+            else:
+                d = {"expression": str(f)}
+            # 确保必需字段存在
+            d.setdefault("name", "")
+            d.setdefault("expression", "")
+            d.setdefault("description", "")
+            return d
+
         session = {
             "id":           len(self._sessions) + 1,
             "timestamp":    datetime.now().isoformat(timespec="seconds"),
             "status":       status,
             "factor_count": len(factors),
-            "factors":      [
-                {"name": f.name if hasattr(f, "name") else f.get("name", ""),
-                 "expression": f.expression if hasattr(f, "expression") else f.get("expression", "")}
-                for f in factors
-            ],
+            "factors":      [_to_dict(f) for f in factors],
         }
         self._sessions.append(session)
         self._save()

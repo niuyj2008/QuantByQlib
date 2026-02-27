@@ -12,7 +12,7 @@ from PyQt6.QtCore import QRunnable, QObject, pyqtSignal
 
 class FactorInjectSignals(QObject):
     progress  = pyqtSignal(int, str)   # (pct, message)
-    completed = pyqtSignal(list)        # list[str] 通过验证的因子表达式
+    completed = pyqtSignal(list)        # list[dict] 通过验证的因子（含 expression/name/description）
     error     = pyqtSignal(str)         # 错误信息
 
 
@@ -63,7 +63,7 @@ class FactorInjectWorker(QRunnable):
                 except Exception as e:
                     logger.debug(f"[因子注入] 清除缓存失败（忽略）：{e}")
 
-            # EventBus 广播
+            # EventBus 广播（传因子列表，UI 可直接刷新）
             try:
                 from core.event_bus import get_event_bus
                 get_event_bus().rdagent_factors_injected.emit(valid_exprs)
@@ -71,7 +71,7 @@ class FactorInjectWorker(QRunnable):
                 logger.debug(f"[因子注入] EventBus 广播失败（忽略）：{e}")
 
             cb(100, f"完成：{len(valid_exprs)} 个因子通过验证")
-            self.signals.completed.emit(valid_exprs)
+            self.signals.completed.emit(valid_exprs)   # list[dict]
 
         except Exception as e:
             from loguru import logger as _log

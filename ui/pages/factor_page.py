@@ -11,7 +11,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QTextEdit, QFrame, QGridLayout,
     QTableWidget, QTableWidgetItem, QHeaderView,
-    QSplitter, QProgressBar, QSizePolicy,
+    QSplitter, QProgressBar, QSizePolicy, QScrollArea,
 )
 from PyQt6.QtCore import Qt, QThreadPool, QTimer
 from PyQt6.QtGui import QColor, QFont
@@ -28,6 +28,8 @@ class FactorPage(QWidget):
         self._connect_events()
         # 延迟检测 Docker 状态（避免阻塞启动）
         QTimer.singleShot(1500, self._check_docker_status)
+        # 延迟加载历史会话（若有）
+        QTimer.singleShot(800, self._load_latest_session)
 
     def _setup_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -197,11 +199,36 @@ class FactorPage(QWidget):
         self._inject_progress.hide()
         ff_layout.addWidget(self._inject_progress)
 
-        # 注入状态标签（显示最近一次注入结果）
+        # 注入状态标签（显示"已注入 N 个"或错误）
         self._inject_status_lbl = QLabel("")
         self._inject_status_lbl.setWordWrap(True)
         self._inject_status_lbl.setStyleSheet("font-size:11px; padding: 2px 4px;")
         ff_layout.addWidget(self._inject_status_lbl)
+
+        # ── 已注入因子清单（带 tooltip 通俗描述）──
+        injected_hdr = QLabel("已注入因子库：")
+        injected_hdr.setStyleSheet(
+            f"color:{COLORS['text_muted']}; font-size:11px; padding: 2px 0 0 0;"
+        )
+        ff_layout.addWidget(injected_hdr)
+
+        # 滚动区容纳因子标签列表
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setMaximumHeight(120)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("background: transparent;")
+
+        self._injected_tags_widget = QWidget()
+        self._injected_tags_widget.setStyleSheet("background: transparent;")
+        self._injected_tags_layout = QVBoxLayout(self._injected_tags_widget)
+        self._injected_tags_layout.setSpacing(2)
+        self._injected_tags_layout.setContentsMargins(0, 0, 0, 0)
+        self._injected_tags_layout.addStretch()
+
+        scroll.setWidget(self._injected_tags_widget)
+        ff_layout.addWidget(scroll)
 
         # 初始化时读取已有注入状态
         QTimer.singleShot(500, self._refresh_inject_status)
@@ -251,6 +278,21 @@ class FactorPage(QWidget):
                 )
         except Exception as e:
             self._docker_label.setText(f"Docker 状态：<b style='color:{COLORS['danger']};'>❌ 错误 {e}</b>")
+
+    def _load_latest_session(self) -> None:
+        """启动时加载最近一次历史会话（若有），无需 Docker"""
+        try:
+            from rdagent_integration.session_manager import get_session_manager
+            latest = get_session_manager().get_latest()
+            if latest and latest.get("factors"):
+                factors = latest["factors"]
+                self._on_completed(factors)
+                self._append_log(
+                    f"[INFO] 已加载历史会话 {latest.get('session_id','')}"
+                    f"，共 {len(factors)} 个因子"
+                )
+        except Exception:
+            pass  # 历史会话不存在或解析失败时静默忽略
 
     # ── 控制事件 ──────────────────────────────────────────────
 
@@ -422,28 +464,26 @@ class FactorPage(QWidget):
         self._inject_progress.setValue(pct)
         self._inject_progress.setFormat(f"{msg[:50]}  {pct}%")
 
-    def _on_inject_completed(self, valid_exprs: list) -> None:
+    def _on_inject_completed(self, valid_factors: list) -> None:
         self._inject_progress.hide()
         self._inject_btn.setEnabled(True)
         self._inject_btn.setText("✅ 注入选股策略")
 
-        n = len(valid_exprs)
+        n = len(valid_factors)
         if n > 0:
-            preview = "、".join(e[:25] for e in valid_exprs[:3])
-            if n > 3:
-                preview += f" 等 {n} 个"
             color_ok = COLORS["success"]
             self._inject_status_lbl.setText(
                 f"<span style='color:{color_ok};'>"
-                f"&#x2705; 已注入 {n} 个因子，下次选股将自动使用<br/>"
-                f"<small>{preview}</small></span>"
+                f"&#x2705; 已注入 {n} 个因子，下次选股将自动使用</span>"
             )
+            self._build_factor_tags(valid_factors)
         else:
             color_warn = COLORS["warning"]
             self._inject_status_lbl.setText(
                 f"<span style='color:{color_warn};'>"
                 f"&#x26A0; 无因子通过 IC 验证（阈值 0.03），策略保持不变</span>"
             )
+            self._build_factor_tags([])
 
     def _on_inject_error(self, err: str) -> None:
         self._inject_progress.hide()
@@ -454,6 +494,50 @@ class FactorPage(QWidget):
             f"<span style='color:{color_err};'>&#x274C; 注入失败：{err[:80]}</span>"
         )
 
+    def _build_factor_tags(self, factors: list) -> None:
+        """
+        在 _injected_tags_layout 中为每个因子创建一个带 tooltip 的标签行。
+        factors: list[dict]  含 expression / name / description
+        """
+        # 清除旧标签（保留末尾的 stretch）
+        while self._injected_tags_layout.count() > 1:
+            item = self._injected_tags_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        if not factors:
+            empty = QLabel("暂无已注入因子")
+            empty.setStyleSheet(f"color:{COLORS['text_muted']}; font-size:11px;")
+            self._injected_tags_layout.insertWidget(0, empty)
+            return
+
+        for i, f in enumerate(factors):
+            expr = f.get("expression", "") if isinstance(f, dict) else str(f)
+            name = f.get("name", "")        if isinstance(f, dict) else ""
+            desc = f.get("description", "") if isinstance(f, dict) else ""
+
+            display = f"• {name}：{expr[:40]}{'…' if len(expr) > 40 else ''}" if name \
+                      else f"• {expr[:50]}{'…' if len(expr) > 50 else ''}"
+
+            lbl = QLabel(display)
+            lbl.setStyleSheet(
+                f"color:{COLORS['text_secondary']}; font-size:11px; "
+                f"padding: 1px 4px; border-radius:3px;"
+            )
+            lbl.setCursor(Qt.CursorShape.WhatsThisCursor)
+
+            # Tooltip：通俗描述 + 完整表达式
+            tooltip_lines = []
+            if name:
+                tooltip_lines.append(f"<b>{name}</b>")
+            if desc:
+                tooltip_lines.append(desc)
+            tooltip_lines.append(f"<code>{expr}</code>")
+            lbl.setToolTip("<br>".join(tooltip_lines))
+            lbl.setTextFormat(Qt.TextFormat.PlainText)
+
+            self._injected_tags_layout.insertWidget(i, lbl)
+
     def _refresh_inject_status(self) -> None:
         """页面加载时读取已有注入状态并展示"""
         try:
@@ -463,17 +547,15 @@ class FactorPage(QWidget):
                 n     = status["count"]
                 ts    = status.get("updated_at", "")[:16]
                 age_h = status.get("age_hours", 0)
-                exprs = status.get("expressions", [])
-                preview = "、".join(e[:25] for e in exprs[:2])
-                if n > 2:
-                    preview += f" 等 {n} 个"
                 age_str = f"{age_h:.1f}h 前" if age_h < 48 else f"{int(age_h/24)}天前"
                 color_muted = COLORS["text_muted"]
                 self._inject_status_lbl.setText(
                     f"<span style='color:{color_muted};'>"
-                    f"上次注入（{ts}，{age_str}）：{preview}</span>"
+                    f"上次注入（{ts}，{age_str}），共 {n} 个因子</span>"
                 )
-                # 已有注入记录时，也允许手动触发重新注入（因子表格有数据才启用）
+                self._build_factor_tags(status.get("factors", []))
+            else:
+                self._build_factor_tags([])
         except Exception:
             pass
 

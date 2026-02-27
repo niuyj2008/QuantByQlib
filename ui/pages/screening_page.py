@@ -9,9 +9,9 @@ from __future__ import annotations
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QGridLayout, QFrame, QProgressBar,
-    QSizePolicy
+    QSizePolicy, QScrollArea,
 )
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QFont
 from ui.theme import COLORS
 
@@ -159,6 +159,8 @@ class ScreeningPage(QWidget):
         self._connect_events()
         # 默认选中第一个策略
         self._on_strategy_selected("deep_learning")
+        # 延迟加载已注入因子状态
+        QTimer.singleShot(800, self._refresh_injected_factors)
 
     def _setup_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -204,6 +206,51 @@ class ScreeningPage(QWidget):
             f"color: {COLORS['primary_light']}; font-weight: bold; font-size: 14px;"
         )
         control_layout.addWidget(self._selected_label)
+
+        # ── 已注入因子面板 ────────────────────────────
+        injected_frame = QFrame()
+        injected_frame.setStyleSheet(
+            f"QFrame {{ background: {COLORS['bg_card']}55; "
+            f"border: 1px solid {COLORS['border']}44; border-radius: 6px; }}"
+        )
+        injected_inner = QVBoxLayout(injected_frame)
+        injected_inner.setContentsMargins(8, 6, 8, 6)
+        injected_inner.setSpacing(3)
+
+        injected_title_row = QHBoxLayout()
+        injected_title = QLabel("🧬 已注入自定义因子")
+        injected_title.setStyleSheet(
+            f"color:{COLORS['text_secondary']}; font-size:11px; font-weight:bold;"
+            f" border:none; background:transparent;"
+        )
+        injected_title_row.addWidget(injected_title)
+        injected_title_row.addStretch()
+        self._injected_count_lbl = QLabel("无")
+        self._injected_count_lbl.setStyleSheet(
+            f"color:{COLORS['text_muted']}; font-size:11px;"
+            f" border:none; background:transparent;"
+        )
+        injected_title_row.addWidget(self._injected_count_lbl)
+        injected_inner.addLayout(injected_title_row)
+
+        # 因子标签滚动区
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setMaximumHeight(80)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("background: transparent; border: none;")
+
+        self._inj_tags_widget = QWidget()
+        self._inj_tags_widget.setStyleSheet("background: transparent;")
+        self._inj_tags_layout = QVBoxLayout(self._inj_tags_widget)
+        self._inj_tags_layout.setSpacing(1)
+        self._inj_tags_layout.setContentsMargins(0, 0, 0, 0)
+        self._inj_tags_layout.addStretch()
+        scroll.setWidget(self._inj_tags_widget)
+        injected_inner.addWidget(scroll)
+
+        control_layout.addWidget(injected_frame)
 
         # 进度条
         self._progress_bar = QProgressBar()
@@ -263,12 +310,66 @@ class ScreeningPage(QWidget):
         from core.event_bus import get_event_bus
         get_event_bus().screening_failed.emit("用户手动停止")
 
+    def _build_inj_tags(self, factors: list) -> None:
+        """在 _inj_tags_layout 中为每个因子创建带 tooltip 的标签行"""
+        while self._inj_tags_layout.count() > 1:
+            item = self._inj_tags_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        if not factors:
+            lbl = QLabel("暂无注入因子，LightGBM 策略将使用标准 Alpha158")
+            lbl.setStyleSheet(
+                f"color:{COLORS['text_muted']}; font-size:10px; border:none; background:transparent;"
+            )
+            self._inj_tags_layout.insertWidget(0, lbl)
+            self._injected_count_lbl.setText("无")
+            return
+
+        self._injected_count_lbl.setText(f"共 {len(factors)} 个（仅 LightGBM 策略使用）")
+        for i, f in enumerate(factors):
+            expr = f.get("expression", "") if isinstance(f, dict) else str(f)
+            name = f.get("name", "")        if isinstance(f, dict) else ""
+            desc = f.get("description", "") if isinstance(f, dict) else ""
+
+            display = f"• {name}：{expr[:38]}{'…' if len(expr) > 38 else ''}" if name \
+                      else f"• {expr[:48]}{'…' if len(expr) > 48 else ''}"
+
+            lbl = QLabel(display)
+            lbl.setStyleSheet(
+                f"color:{COLORS['text_secondary']}; font-size:10px; "
+                f"border:none; background:transparent; padding:0px 2px;"
+            )
+            lbl.setCursor(Qt.CursorShape.WhatsThisCursor)
+
+            tooltip_lines = []
+            if name:
+                tooltip_lines.append(f"<b>{name}</b>")
+            if desc:
+                tooltip_lines.append(desc)
+            tooltip_lines.append(f"<code>{expr}</code>")
+            lbl.setToolTip("<br>".join(tooltip_lines))
+            lbl.setTextFormat(Qt.TextFormat.PlainText)
+
+            self._inj_tags_layout.insertWidget(i, lbl)
+
+    def _refresh_injected_factors(self) -> None:
+        """读取 valid_factors.json 并刷新因子面板"""
+        try:
+            from strategies.factor_injector import get_inject_status
+            status = get_inject_status()
+            self._build_inj_tags(status.get("factors", []))
+        except Exception:
+            self._build_inj_tags([])
+
     def _connect_events(self) -> None:
         from core.event_bus import get_event_bus
         bus = get_event_bus()
         bus.screening_progress.connect(self._on_progress)
         bus.screening_completed.connect(self._on_completed)
         bus.screening_failed.connect(self._on_failed)
+        # 因子注入完成后自动刷新面板
+        bus.rdagent_factors_injected.connect(self._build_inj_tags)
 
     def _on_progress(self, pct: int, msg: str) -> None:
         self._progress_bar.setValue(pct)
