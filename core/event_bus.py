@@ -40,6 +40,7 @@ class EventBus(QObject):
     backtest_progress = pyqtSignal(int, str)         # 参数: 进度(0-100), 状态文字
     backtest_completed = pyqtSignal(object)          # 参数: BacktestResult
     backtest_failed = pyqtSignal(str)                # 参数: 错误信息
+    backtest_ticker_hint = pyqtSignal(str)           # 参数: ticker（选股结果跳转时携带）
 
     # ── RD-Agent 事件 ────────────────────────────────────────
     rdagent_started = pyqtSignal()

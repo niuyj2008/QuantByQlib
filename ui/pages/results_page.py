@@ -213,9 +213,11 @@ class ResultsPage(QWidget):
                           if hasattr(bus, "open_buy_dialog") else None)
 
     def _on_run_strategy(self, ticker: str) -> None:
-        """跳转到回测页"""
+        """跳转到回测页，并携带 ticker 提示"""
         from core.event_bus import get_event_bus
-        get_event_bus().navigate_to.emit("backtest")
+        bus = get_event_bus()
+        bus.navigate_to.emit("backtest")
+        bus.backtest_ticker_hint.emit(ticker)
 
     def _on_export(self) -> None:
         if not self._results:

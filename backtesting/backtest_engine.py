@@ -410,8 +410,18 @@ class BacktestEngine:
     def _fetch_prices_batch(self, tickers: list[str],
                              start: str, end: str,
                              progress_cb=None) -> Optional[pd.DataFrame]:
-        """批量获取收盘价（以 ticker 为列），用 yfinance 一次性批量下载"""
+        """批量获取收盘价（以 ticker 为列），优先读本地缓存，未命中再用 yfinance 下载"""
+        from backtesting.price_cache import price_cache_key, load_prices, save_prices, _get_ttl_hours
+
+        key = price_cache_key(tickers, start, end)
+        ttl = _get_ttl_hours(end)
+        cached = load_prices(key, max_age_hours=ttl)
+        if cached is not None and isinstance(cached, pd.DataFrame):
+            self._cb(progress_cb, 45, f"命中价格缓存（{cached.shape[1]} 支）")
+            return cached
+
         self._cb(progress_cb, 30, f"批量下载 {len(tickers)} 支股票价格...")
+        close_df = None
         try:
             import yfinance as yf
             # yfinance 一次下载所有 ticker，速度远快于逐一下载
@@ -455,6 +465,7 @@ class BacktestEngine:
                 raise ValueError("所有股票数据不足")
 
             self._cb(progress_cb, 45, f"批量下载完成，{close_df.shape[1]} 支有效数据")
+            save_prices(key, close_df)
             return close_df
 
         except Exception as e:
@@ -472,11 +483,21 @@ class BacktestEngine:
 
         if not frames:
             return None
-        return pd.DataFrame(frames).sort_index()
+        result_df = pd.DataFrame(frames).sort_index()
+        save_prices(key, result_df)
+        return result_df
 
     def _fetch_single_price(self, ticker: str,
                              start: str, end: str) -> Optional[pd.Series]:
-        """获取单只股票收盘价序列，优先 yfinance 直接调用，失败时走 OpenBB"""
+        """获取单只股票收盘价序列，优先读本地缓存，未命中再用 yfinance / OpenBB 下载"""
+        from backtesting.price_cache import price_cache_key, load_prices, save_prices, _get_ttl_hours
+
+        key = price_cache_key([ticker], start, end)
+        ttl = _get_ttl_hours(end)
+        cached = load_prices(key, max_age_hours=ttl)
+        if cached is not None and isinstance(cached, pd.Series):
+            return cached
+
         # 1. yfinance 直接获取（最可靠，无需 API Key）
         try:
             import yfinance as yf
@@ -493,6 +514,7 @@ class BacktestEngine:
                 if close_col and not df[close_col].dropna().empty:
                     s = df[close_col].dropna()
                     s.index = pd.to_datetime(s.index)
+                    save_prices(key, s)
                     return s
         except Exception as e:
             logger.debug(f"yfinance 直接获取 {ticker} 失败：{e}")
@@ -510,6 +532,7 @@ class BacktestEngine:
                 if close_col:
                     s = df[close_col].dropna()
                     s.index = pd.to_datetime(s.index)
+                    save_prices(key, s)
                     return s
         except Exception as e:
             logger.debug(f"OpenBB 获取 {ticker} 失败：{e}")

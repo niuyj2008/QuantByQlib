@@ -146,6 +146,30 @@ class BacktestPage(QWidget):
         param_layout.addLayout(btn_row, 4, 3)
         layout.addWidget(param_card)
 
+        # ── 来自选股的 ticker 提示条（默认隐藏）──
+        self._ticker_hint_bar = QFrame()
+        self._ticker_hint_bar.setObjectName("card")
+        self._ticker_hint_bar.setStyleSheet(
+            f"background:{COLORS['bg_card_hover']}; border:1px solid {COLORS['primary']}; border-radius:6px;"
+        )
+        hint_row = QHBoxLayout(self._ticker_hint_bar)
+        hint_row.setContentsMargins(12, 8, 12, 8)
+        self._ticker_hint_lbl = QLabel()
+        self._ticker_hint_lbl.setStyleSheet(
+            f"color:{COLORS['primary']}; font-size:12px;"
+        )
+        hint_row.addWidget(self._ticker_hint_lbl)
+        hint_row.addStretch()
+        close_btn = QPushButton("✕")
+        close_btn.setFixedSize(20, 20)
+        close_btn.setStyleSheet(
+            f"color:{COLORS['text_muted']}; border:none; background:transparent; font-size:11px;"
+        )
+        close_btn.clicked.connect(self._ticker_hint_bar.hide)
+        hint_row.addWidget(close_btn)
+        self._ticker_hint_bar.hide()
+        layout.addWidget(self._ticker_hint_bar)
+
         # ── 结果区域 ──
         self._result_area = QWidget()
         rl = QVBoxLayout(self._result_area)
@@ -215,6 +239,15 @@ class BacktestPage(QWidget):
         bus = get_event_bus()
         bus.backtest_completed.connect(self._on_completed)
         bus.backtest_failed.connect(self._on_failed)
+        bus.backtest_ticker_hint.connect(self._on_ticker_hint)
+
+    def _on_ticker_hint(self, ticker: str) -> None:
+        """显示来自选股结果的 ticker 提示"""
+        self._ticker_hint_lbl.setText(
+            f"💡 来自选股结果：{ticker} — 以下回测针对整个策略股票池，"
+            f"可验证选出 {ticker} 的策略在历史上的整体表现"
+        )
+        self._ticker_hint_bar.show()
 
     def _on_run(self) -> None:
         if self._start_date.date() >= self._end_date.date():
