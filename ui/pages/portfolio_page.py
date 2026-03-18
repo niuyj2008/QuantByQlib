@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QTableWidget, QTableWidgetItem,
     QTabWidget, QHeaderView, QFrame, QMessageBox,
-    QMenu
+    QMenu, QProgressDialog,
 )
 from PyQt6.QtCore import Qt, QTimer, QThreadPool
 from PyQt6.QtGui import QColor, QFont
@@ -47,6 +47,11 @@ class PortfolioPage(QWidget):
         self._refresh_btn.setObjectName("btn_secondary")
         self._refresh_btn.clicked.connect(self._on_refresh_prices)
         header_row.addWidget(self._refresh_btn)
+
+        self._export_charts_btn = QPushButton("📊 批量导出图表")
+        self._export_charts_btn.setObjectName("btn_secondary")
+        self._export_charts_btn.clicked.connect(self._on_export_charts)
+        header_row.addWidget(self._export_charts_btn)
 
         buy_btn = QPushButton("📈 买入")
         buy_btn.clicked.connect(self._on_buy)
@@ -103,9 +108,9 @@ class PortfolioPage(QWidget):
         lay.setSpacing(8)
 
         self._holdings_table = QTableWidget()
-        self._holdings_table.setColumnCount(10)
+        self._holdings_table.setColumnCount(11)
         self._holdings_table.setHorizontalHeaderLabels([
-            "股票", "股数", "均价", "现价", "市值", "盈亏$", "盈亏%", "今日", "卖出", "分析"
+            "股票", "股数", "均价", "现价", "市值", "盈亏$", "盈亏%", "今日", "卖出", "分析", "图表"
         ])
         self._holdings_table.setAlternatingRowColors(True)
         self._holdings_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
@@ -117,7 +122,7 @@ class PortfolioPage(QWidget):
         # 横向滚动条始终显示
         self._holdings_table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         hdr = self._holdings_table.horizontalHeader()
-        # 所有列固定宽度，总宽约820px，超出时横向滚动
+        # 所有列固定宽度，总宽约884px，超出时横向滚动
         hdr.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
         hdr.resizeSection(0, 72)   # 股票
         hdr.resizeSection(1, 60)   # 股数
@@ -129,6 +134,7 @@ class PortfolioPage(QWidget):
         hdr.resizeSection(7, 80)   # 今日
         hdr.resizeSection(8, 64)   # 卖出
         hdr.resizeSection(9, 64)   # 分析
+        hdr.resizeSection(10, 64)  # 图表
         lay.addWidget(self._holdings_table)
 
         self._holdings_empty = QLabel(
@@ -346,6 +352,16 @@ class PortfolioPage(QWidget):
             d_btn.clicked.connect(lambda _, s=sym: self._on_show_detail(s))
             anal_lay.addWidget(d_btn)
             self._holdings_table.setCellWidget(row, 9, anal_w)
+
+            # 图表按钮（第10列）
+            chart_w = QWidget()
+            chart_lay = QHBoxLayout(chart_w)
+            chart_lay.setContentsMargins(4, 4, 4, 4)
+            c_btn = QPushButton("图表")
+            c_btn.setStyleSheet(_anal_style)
+            c_btn.clicked.connect(lambda _, s=sym: self._on_show_chart(s))
+            chart_lay.addWidget(c_btn)
+            self._holdings_table.setCellWidget(row, 10, chart_w)
 
         self._holdings_summary.setText(
             f"共 {len(positions)} 个持仓" if positions else ""
@@ -590,3 +606,70 @@ class PortfolioPage(QWidget):
             f = QFont(); f.setBold(True)
             item.setFont(f)
         self._trans_table.setItem(row, col, item)
+
+    # ── K 线图 ─────────────────────────────────────────────
+
+    def _on_show_chart(self, symbol: str) -> None:
+        """弹出单支股票的 K 线图窗口（5日/日线/周线）"""
+        from ui.dialogs.chart_dialog import ChartDialog
+        dlg = ChartDialog(symbol, parent=self)
+        dlg.show()
+
+    def _on_export_charts(self) -> None:
+        """批量导出所有持仓股票的 K 线图 PNG 到本地文件夹"""
+        if not self._positions:
+            QMessageBox.information(self, "无持仓", "当前没有持仓记录，无法导出图表。")
+            return
+
+        from PyQt6.QtWidgets import QFileDialog
+        from pathlib import Path
+
+        default_dir = str(Path.home() / "Downloads" / "portfolio_charts")
+        out_dir = QFileDialog.getExistingDirectory(
+            self, "选择导出目录", default_dir
+        )
+        if not out_dir:
+            return
+
+        tickers = [p["symbol"] for p in self._positions]
+
+        # 进度对话框
+        progress = QProgressDialog(
+            f"正在导出 {len(tickers)} 支持仓股票的 K 线图...", "取消", 0, 100, self
+        )
+        progress.setWindowTitle("批量导出图表")
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+
+        from workers.chart_export_worker import ChartExportWorker
+        worker = ChartExportWorker(tickers, Path(out_dir))
+        worker.signals.progress.connect(
+            lambda pct, msg: (progress.setValue(pct), progress.setLabelText(msg))
+        )
+        worker.signals.completed.connect(lambda d: self._on_export_charts_done(d, progress))
+        worker.signals.error.connect(lambda e: self._on_export_charts_error(e, progress))
+        self._export_charts_btn.setEnabled(False)
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_export_charts_done(self, out_dir: str, progress: "QProgressDialog") -> None:
+        progress.close()
+        self._export_charts_btn.setEnabled(True)
+        import subprocess, sys
+        # 自动打开导出目录
+        if sys.platform == "darwin":
+            subprocess.Popen(["open", out_dir])
+        elif sys.platform == "win32":
+            subprocess.Popen(["explorer", out_dir])
+        else:
+            subprocess.Popen(["xdg-open", out_dir])
+        QMessageBox.information(
+            self, "导出完成",
+            f"K 线图已保存到：\n{out_dir}\n\n"
+            "文件命名格式：TICKER_5d.png / TICKER_day.png / TICKER_week.png"
+        )
+
+    def _on_export_charts_error(self, err: str, progress: "QProgressDialog") -> None:
+        progress.close()
+        self._export_charts_btn.setEnabled(True)
+        QMessageBox.critical(self, "导出失败", f"批量导出图表失败：\n{err}")
