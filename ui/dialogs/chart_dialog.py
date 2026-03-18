@@ -87,10 +87,18 @@ class _ChartCanvas(QWidget):
             import mplfinance as mpf
             import matplotlib
             matplotlib.use("QtAgg")
-            from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
             import matplotlib.pyplot as plt
+            # 设置中文字体，按优先级尝试
+            for _font in ["PingFang HK", "PingFang SC", "STHeiti", "Heiti TC", "Arial Unicode MS"]:
+                try:
+                    plt.rcParams["font.family"] = _font
+                    break
+                except Exception:
+                    continue
+            plt.rcParams["axes.unicode_minus"] = False   # 修复负号显示
+            from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 
-            _TITLES = {"5d": "5日图（5分钟K）", "day": "日线图（近60日）", "week": "周线图（近2年）"}
+            _TITLES = {"5d": "5D (5min K)", "day": "Daily (60d)", "week": "Weekly (2yr)"}
             title = f"{self.ticker}  {_TITLES.get(period_key, period_key)}"
 
             style = mpf.make_mpf_style(

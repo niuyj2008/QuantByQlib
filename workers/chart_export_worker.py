@@ -22,9 +22,9 @@ class ChartExportWorker(QRunnable):
     """
 
     _PERIOD_PARAMS = {
-        "5d":   dict(period="5d",   interval="5m",  label="5日图"),
-        "day":  dict(period="60d",  interval="1d",  label="日线"),
-        "week": dict(period="104wk",interval="1wk", label="周线"),
+        "5d":   dict(period="5d",   interval="5m",  label="5D Chart"),
+        "day":  dict(period="60d",  interval="1d",  label="Daily"),
+        "week": dict(period="104wk",interval="1wk", label="Weekly"),
     }
 
     def __init__(self, tickers: list[str], output_dir: Path):
@@ -44,6 +44,15 @@ class ChartExportWorker(QRunnable):
             matplotlib.use("Agg")   # 无 GUI 后端，适合后台导出
 
             self.output_dir.mkdir(parents=True, exist_ok=True)
+
+            import matplotlib.pyplot as plt
+            for _font in ["PingFang HK", "PingFang SC", "STHeiti", "Heiti TC", "Arial Unicode MS"]:
+                try:
+                    plt.rcParams["font.family"] = _font
+                    break
+                except Exception:
+                    continue
+            plt.rcParams["axes.unicode_minus"] = False
 
             total = len(self.tickers) * len(self._PERIOD_PARAMS)
             done  = 0
