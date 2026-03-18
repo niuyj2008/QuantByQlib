@@ -55,9 +55,9 @@ def get_candlesticks(ticker: str, period_key: str) -> Optional[pd.DataFrame]:
         from longport.openapi import QuoteContext, Period, AdjustType
 
         _PERIOD_MAP = {
-            "5d":   (Period.Min_5, 390),
-            "day":  (Period.Day,    60),
-            "week": (Period.Week,  104),
+            "5d":   (Period.Day,   30),   # 取30根日K，前端截取最后12根
+            "day":  (Period.Day,   60),
+            "week": (Period.Week, 104),
         }
         period, count = _PERIOD_MAP[period_key]
 
@@ -90,6 +90,9 @@ def get_candlesticks(ticker: str, period_key: str) -> Optional[pd.DataFrame]:
         df["Date"] = pd.to_datetime(df["Date"])
         df = df.set_index("Date").sort_index()
         df.index.name = "Date"
+        # 5d 放大图只取最近12根日K
+        if period_key == "5d":
+            df = df.tail(12)
         return df
 
     except Exception as e:

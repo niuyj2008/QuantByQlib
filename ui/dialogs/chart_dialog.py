@@ -20,9 +20,9 @@ class _FetchSignals(QObject):
 class _FetchWorker(QRunnable):
     """后台拉取 yfinance 数据"""
 
-    # yfinance fallback 参数
+    # yfinance fallback 参数（5d 取30日日线再截取最后12根，不用分钟K）
     _YF_PARAMS = {
-        "5d":  dict(period="5d",   interval="5m"),
+        "5d":  dict(period="30d",  interval="1d"),
         "day": dict(period="60d",  interval="1d"),
         "week":dict(period="104wk",interval="1wk"),
     }
@@ -65,6 +65,9 @@ class _FetchWorker(QRunnable):
             if hasattr(df.columns, "levels"):
                 df.columns = df.columns.get_level_values(0)
             df.index.name = "Date"
+            # 5d 图取最近12根日K（相当于约2.5周的放大窗口）
+            if self.period_key == "5d":
+                df = df.tail(12)
         return df
 
 
@@ -130,7 +133,7 @@ class _ChartCanvas(QWidget):
 
             from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 
-            _TITLES = {"5d": "5D (5min)", "day": "Daily (60d)", "week": "Weekly (2yr)"}
+            _TITLES = {"5d": "近期日线 (12根)", "day": "Daily (60d)", "week": "Weekly (2yr)"}
             try:
                 from data.longport_client import is_configured
                 src = "LongPort" if is_configured() else "yfinance"

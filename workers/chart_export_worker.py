@@ -22,7 +22,7 @@ class ChartExportWorker(QRunnable):
     """
 
     _PERIOD_PARAMS = {
-        "5d":   dict(period="5d",   interval="5m",  label="5D Chart"),
+        "5d":   dict(period="30d",  interval="1d",  label="Recent12D"),
         "day":  dict(period="60d",  interval="1d",  label="Daily"),
         "week": dict(period="104wk",interval="1wk", label="Weekly"),
     }
@@ -117,6 +117,8 @@ class ChartExportWorker(QRunnable):
                                 if hasattr(df.columns, "levels"):
                                     df.columns = df.columns.get_level_values(0)
                                 df.index.name = "Date"
+                                if period_key == "5d":
+                                    df = df.tail(12)
 
                         if df is None or df.empty:
                             logger.warning(f"[图表导出] {ticker} {label} 无数据，跳过")
