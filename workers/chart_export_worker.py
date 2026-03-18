@@ -124,7 +124,9 @@ class ChartExportWorker(QRunnable):
                             continue
 
                         title = f"{ticker}  {label}  [{src}]"
-                        save_path = self.output_dir / f"{ticker}_{period_key}.png"
+                        from datetime import date
+                        date_str = date.today().strftime("%Y%m%d")
+                        save_path = self.output_dir / f"{ticker}_{period_key}_{date_str}.png"
 
                         mav = _MAV.get(period_key, (5, 20))
                         fig, _ = mpf.plot(
