@@ -100,20 +100,34 @@ class _ChartCanvas(QWidget):
         self._signals = signals
         QThreadPool.globalInstance().start(worker)
 
+    # 各周期均线配置
+    _MAV = {
+        "5d":   (5, 10, 20),        # 5日图：MA5 / MA10 / MA20（分钟K）
+        "day":  (5, 10, 20, 30),    # 日线：MA5 / MA10 / MA20 / MA30
+        "week": (5, 10, 20),        # 周线：MA5 / MA10 / MA20
+    }
+
     def _on_data(self, df, period_key: str) -> None:
         try:
             import mplfinance as mpf
             import matplotlib
             matplotlib.use("QtAgg")
             import matplotlib.pyplot as plt
-            # 设置中文字体，按优先级尝试
-            for _font in ["PingFang HK", "PingFang SC", "STHeiti", "Heiti TC", "Arial Unicode MS"]:
+            import matplotlib.font_manager as fm
+
+            # 找到可用中文字体的 FontProperties 对象
+            _cn_font = None
+            for _fname in ["PingFang HK", "PingFang SC", "STHeiti", "Heiti TC", "Arial Unicode MS"]:
                 try:
-                    plt.rcParams["font.family"] = _font
-                    break
+                    _fp = fm.FontProperties(family=_fname)
+                    if fm.findfont(_fp, fallback_to_default=False):
+                        _cn_font = _fp
+                        plt.rcParams["font.family"] = _fname
+                        break
                 except Exception:
                     continue
-            plt.rcParams["axes.unicode_minus"] = False   # 修复负号显示
+            plt.rcParams["axes.unicode_minus"] = False
+
             from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 
             _TITLES = {"5d": "5D (5min)", "day": "Daily (60d)", "week": "Weekly (2yr)"}
@@ -123,6 +137,8 @@ class _ChartCanvas(QWidget):
             except Exception:
                 src = "yfinance"
             title = f"{self.ticker}  {_TITLES.get(period_key, period_key)}  [{src}]"
+
+            mav = self._MAV.get(period_key, (5, 20))
 
             style = mpf.make_mpf_style(
                 base_mpf_style="charles",
@@ -134,6 +150,7 @@ class _ChartCanvas(QWidget):
                 figcolor="#FFFFFF",
                 gridcolor="#E2E4EA",
                 gridstyle="--",
+                mavcolors=["#F59E0B", "#3B82F6", "#8B5CF6", "#EC4899"],  # 均线颜色
             )
 
             fig, axes = mpf.plot(
@@ -142,10 +159,17 @@ class _ChartCanvas(QWidget):
                 style=style,
                 title=title,
                 volume=True,
+                mav=mav,
                 returnfig=True,
                 figsize=(10, 6),
                 tight_layout=True,
             )
+
+            # 对所有 axes 的 tick label 强制应用中文字体（修复 X 轴月份乱码）
+            if _cn_font:
+                for ax in fig.get_axes():
+                    for lbl in ax.get_xticklabels() + ax.get_yticklabels():
+                        lbl.set_fontproperties(_cn_font)
 
             canvas = FigureCanvas(fig)
             canvas.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)

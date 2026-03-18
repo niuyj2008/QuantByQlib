@@ -57,6 +57,24 @@ class ChartExportWorker(QRunnable):
             total = len(self.tickers) * len(self._PERIOD_PARAMS)
             done  = 0
 
+            import matplotlib.font_manager as fm
+            _cn_font = None
+            for _fname in ["PingFang HK", "PingFang SC", "STHeiti", "Heiti TC", "Arial Unicode MS"]:
+                try:
+                    _fp = fm.FontProperties(family=_fname)
+                    if fm.findfont(_fp, fallback_to_default=False):
+                        _cn_font = _fp
+                        plt.rcParams["font.family"] = _fname
+                        break
+                except Exception:
+                    continue
+
+            _MAV = {
+                "5d":   (5, 10, 20),
+                "day":  (5, 10, 20, 30),
+                "week": (5, 10, 20),
+            }
+
             style = mpf.make_mpf_style(
                 base_mpf_style="charles",
                 marketcolors=mpf.make_marketcolors(
@@ -67,6 +85,7 @@ class ChartExportWorker(QRunnable):
                 figcolor="#FFFFFF",
                 gridcolor="#E2E4EA",
                 gridstyle="--",
+                mavcolors=["#F59E0B", "#3B82F6", "#8B5CF6", "#EC4899"],
             )
 
             for ticker in self.tickers:
@@ -107,18 +126,23 @@ class ChartExportWorker(QRunnable):
                         title = f"{ticker}  {label}  [{src}]"
                         save_path = self.output_dir / f"{ticker}_{period_key}.png"
 
+                        mav = _MAV.get(period_key, (5, 20))
                         fig, _ = mpf.plot(
                             df,
                             type="candle",
                             style=style,
                             title=title,
                             volume=True,
+                            mav=mav,
                             returnfig=True,
                             figsize=(12, 7),
                             tight_layout=True,
                         )
+                        if _cn_font:
+                            for ax in fig.get_axes():
+                                for lbl in ax.get_xticklabels() + ax.get_yticklabels():
+                                    lbl.set_fontproperties(_cn_font)
                         fig.savefig(str(save_path), dpi=150, bbox_inches="tight")
-                        import matplotlib.pyplot as plt
                         plt.close(fig)
                         logger.info(f"[图表导出] 已保存：{save_path}")
 
