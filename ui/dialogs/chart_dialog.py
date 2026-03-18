@@ -36,7 +36,9 @@ class _FetchWorker(QRunnable):
 
     def run(self) -> None:
         try:
-            df = self._fetch_longport() or self._fetch_yfinance()
+            df = self._fetch_longport()
+            if df is None or df.empty:
+                df = self._fetch_yfinance()
             if df is None or df.empty:
                 self.signals.error.emit("无数据", self.period_key)
                 return
