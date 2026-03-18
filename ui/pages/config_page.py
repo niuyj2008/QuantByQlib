@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QLineEdit, QGroupBox, QGridLayout,
     QProgressBar, QTextEdit, QScrollArea, QFrame,
     QSizePolicy, QMessageBox, QTableWidget, QTableWidgetItem,
-    QHeaderView
+    QHeaderView, QComboBox
 )
 from PyQt6.QtCore import Qt, QThreadPool
 from PyQt6.QtGui import QColor
@@ -66,7 +66,8 @@ class ConfigPage(QWidget):
             ("FMP Key:",          "Financial Modeling Prep — 基本面/分析师评级（免费 250次/天）",   "FMP_API_KEY"),
             ("Finnhub Key:",      "Finnhub — 新闻/情绪（免费 60次/分钟）",                        "FINNHUB_API_KEY"),
             ("Alpha Vantage Key:","Alpha Vantage — K线历史数据（免费 25次/天）",                   "ALPHA_VANTAGE_API_KEY"),
-            ("DeepSeek Key:",     "DeepSeek API — RD-Agent LLM 驱动（因子发现）",                "DEEPSEEK_API_KEY"),
+            ("DeepSeek Key:",     "DeepSeek API Key（sk-...）",                                  "DEEPSEEK_API_KEY"),
+            ("Anthropic Key:",    "Anthropic Claude API Key（sk-ant-...）— 用于 Claude 因子发现", "ANTHROPIC_API_KEY"),
         ]
 
         self._key_inputs: dict[str, QLineEdit] = {}
@@ -87,6 +88,28 @@ class ConfigPage(QWidget):
             status.setFixedWidth(24)
             api_layout.addWidget(status, i, 2)
             self._key_status[env_key] = status
+
+        # ── RD-Agent LLM 选择 ──
+        llm_row = QHBoxLayout()
+        llm_lbl = QLabel("因子发现 LLM：")
+        llm_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        llm_lbl.setFixedWidth(120)
+        llm_row.addWidget(llm_lbl)
+
+        self._llm_combo = QComboBox()
+        self._llm_combo.addItems([
+            "deepseek-chat          (DeepSeek — 低成本，适合高频运行)",
+            "deepseek-reasoner      (DeepSeek R1 — 推理增强，更严格遵循约束)",
+            "claude-opus-4-6        (Claude Opus 4.6 — 最强创新力，最高质量)",
+            "claude-sonnet-4-6      (Claude Sonnet 4.6 — 均衡性价比)",
+            "gpt-4o                 (OpenAI GPT-4o — 均衡)",
+        ])
+        self._llm_combo.setToolTip(
+            "选择 RD-Agent 因子发现使用的 LLM。\n"
+            "Claude 系列需要填写 Anthropic Key；DeepSeek 需要 DeepSeek Key；GPT 需要 OpenAI Key。"
+        )
+        llm_row.addWidget(self._llm_combo, stretch=1)
+        api_layout.addLayout(llm_row, len(labels), 0, 1, 3)
 
         # 操作按钮行
         btn_row = QHBoxLayout()
@@ -110,7 +133,7 @@ class ConfigPage(QWidget):
         show_btn.toggled.connect(self._toggle_key_visibility)
         btn_row.addWidget(show_btn)
 
-        api_layout.addLayout(btn_row, len(labels), 0, 1, 3)
+        api_layout.addLayout(btn_row, len(labels) + 1, 0, 1, 3)
         layout.addWidget(api_group)
 
         # ── 测试结果表格 ─────────────────────────────────
@@ -273,22 +296,37 @@ class ConfigPage(QWidget):
 
     # ── 数据加载 ───────────────────────────────────────────
 
+    # model id 与下拉项索引的映射
+    _LLM_MODEL_IDS = [
+        "deepseek-chat",
+        "deepseek-reasoner",
+        "claude-opus-4-6",
+        "claude-sonnet-4-6",
+        "gpt-4o",
+    ]
+
     def _load_saved_keys(self) -> None:
-        """从 .env 文件加载已保存的 Key"""
+        """从 .env 文件加载已保存的 Key 和 LLM 选择"""
         env_path = Path(".env")
         if not env_path.exists():
             return
         try:
             from dotenv import dotenv_values
             vals = dotenv_values(env_path)
+            placeholders = {
+                "your_fmp_api_key_here", "your_finnhub_api_key_here",
+                "your_alpha_vantage_key_here", "your_deepseek_api_key_here",
+            }
             for env_key, inp in self._key_inputs.items():
                 val = vals.get(env_key, "")
-                if val and val not in (
-                    "your_fmp_api_key_here", "your_finnhub_api_key_here",
-                    "your_alpha_vantage_key_here", "your_deepseek_api_key_here"
-                ):
+                if val and val not in placeholders:
                     inp.setText(val)
                     self._key_status[env_key].setText("🟡")
+            # 恢复 LLM 选择
+            saved_model = vals.get("CHAT_MODEL", "deepseek-chat")
+            model_id = saved_model.split("/")[-1]  # 兼容 "deepseek/deepseek-chat" 格式
+            if model_id in self._LLM_MODEL_IDS:
+                self._llm_combo.setCurrentIndex(self._LLM_MODEL_IDS.index(model_id))
         except Exception as e:
             from loguru import logger
             logger.debug(f"加载 .env 失败：{e}")
@@ -337,7 +375,9 @@ class ConfigPage(QWidget):
                 self._key_status[env_key].setText("🟡")
                 saved_count += 1
 
-        existing.setdefault("CHAT_MODEL", "deepseek/deepseek-chat")
+        selected_model = self._LLM_MODEL_IDS[self._llm_combo.currentIndex()]
+        existing["CHAT_MODEL"] = selected_model
+        os.environ["CHAT_MODEL"] = selected_model
 
         with open(env_path, "w", encoding="utf-8") as f:
             for k, v in existing.items():

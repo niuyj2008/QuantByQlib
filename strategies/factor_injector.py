@@ -24,10 +24,11 @@ def _precheck_expression(expr: str) -> tuple[bool, str]:
     快速语法预检，拦截 Qlib 不支持的表达式模式。
     返回 (ok, reason)；ok=False 时 reason 说明原因。
     """
-    # Max/Min 第二参数必须是整数常量（滚动窗口），不能是任何表达式。
-    # 策略：找到 Max( 或 Min(，然后跳过第一个参数（含括号嵌套），检查逗号后的内容。
-    for m in re.finditer(r'\b(Max|Min)\s*\(', expr):
-        start = m.end()          # 指向左括号后的第一个字符
+    # 所有滚动算子（Max/Min/Sum/Mean/Std/Ref）的窗口参数必须是纯整数常量。
+    # 常见错误：Sum($v, 10+0.001) → 'float' object cannot be interpreted as an integer
+    for m in re.finditer(r'\b(Max|Min|Sum|Mean|Std|Ref)\s*\(', expr):
+        op = m.group(1)
+        start = m.end()
         depth = 1
         i = start
         while i < len(expr) and depth > 0:
@@ -36,14 +37,12 @@ def _precheck_expression(expr: str) -> tuple[bool, str]:
             elif expr[i] == ')':
                 depth -= 1
             elif expr[i] == ',' and depth == 1:
-                # 找到了分隔第一/第二参数的逗号
                 second_arg = expr[i+1:].lstrip()
-                # 第二参数若不是纯整数（可能含空格），报错
-                if not re.match(r'^\d+\s*\)', second_arg):
+                if not re.match(r'^\d+\s*[\),]', second_arg):
                     return False, (
-                        f"Max/Min 第二参数必须是整数窗口，不能是表达式（检测到: "
-                        f"{expr[m.start():m.start()+60]}…）。"
-                        f"两序列取较大值请用 If(A>B,A,B)"
+                        f"{op}() 窗口参数必须是纯整数，不能含运算式或小数"
+                        f"（检测到: {expr[m.start():m.start()+60]}…）。"
+                        f"防零除请加在结果上，如 Sum(...,10)+0.001"
                     )
                 break
             i += 1
@@ -52,28 +51,35 @@ def _precheck_expression(expr: str) -> tuple[bool, str]:
     if re.search(r'\bAbs\s*\([^)]*Ref\s*\(', expr):
         return False, "Abs() 内不能嵌套 Ref()，改用 Mean($high-$low, N)"
 
-    # 一元负号 -(expr)
-    if re.search(r'(?<![0-9\$\w])-\s*\(', expr):
+    # 一元负号 -(expr)：- 前面是数字、$变量、) 时均为合法减法，不拦截
+    if re.search(r'(?<![0-9\$\w\)])-\s*\(', expr):
         return False, "不支持一元负号 -(expr)，改写为 0-(expr)"
 
     return True, ""
 
 
 def validate_factor(expression: str, universe: list[str],
-                    threshold_ic: float = IC_THRESHOLD) -> bool:
+                    threshold_ic: float = IC_THRESHOLD,
+                    return_metrics: bool = False):
     """
     用 Qlib D.features 计算因子在股票池上的截面 IC，判断是否有效。
     IC = 因子值与下一期收益率的 Spearman 相关系数均值。
 
-    expression: Qlib 表达式，如 "Ref($close,5)/$close-1"
-    universe:   小写 ticker 列表（与 Qlib features/ 目录一致）
-    返回 True 表示因子 IC 均值 >= threshold_ic。
+    expression:     Qlib 表达式，如 "Ref($close,5)/$close-1"
+    universe:       小写 ticker 列表（与 Qlib features/ 目录一致）
+    return_metrics: True 时返回 (passed, ic_mean, ic_std, sharpe)；
+                    False（默认）时仅返回 bool，保持向后兼容。
     """
     # 语法预检：拦截已知的不支持模式，避免晦涩运行时报错
+    def _fail(msg: str = ""):
+        if msg:
+            logger.warning(msg) if "[因子验证]" in msg else logger.debug(msg)
+        return (False, None, None, None) if return_metrics else False
+
     ok, reason = _precheck_expression(expression)
     if not ok:
         logger.warning(f"[因子验证] {expression[:50]} 语法预检失败：{reason}")
-        return False
+        return (False, None, None, None) if return_metrics else False
 
     try:
         from qlib.data import D
@@ -85,12 +91,12 @@ def validate_factor(expression: str, universe: list[str],
         cal_file = data_dir / "calendars" / "day.txt"
         if not cal_file.exists():
             logger.debug("validate_factor: 日历文件不存在，跳过验证")
-            return False
+            return (False, None, None, None) if return_metrics else False
 
         cal_dates = [l.strip() for l in cal_file.read_text().splitlines() if l.strip()]
         if len(cal_dates) < VALIDATE_DAYS + 5:
             logger.debug("validate_factor: 日历日期不足，跳过验证")
-            return False
+            return (False, None, None, None) if return_metrics else False
 
         end_date   = cal_dates[-1]
         start_date = cal_dates[-(VALIDATE_DAYS + 1)]
@@ -108,7 +114,7 @@ def validate_factor(expression: str, universe: list[str],
             )
             if factor_df is None or factor_df.empty:
                 logger.debug(f"validate_factor: {expression} 因子数据为空")
-                return False
+                return (False, None, None, None) if return_metrics else False
 
             # 取下一期收益率
             ret_df = D.features(
@@ -116,7 +122,7 @@ def validate_factor(expression: str, universe: list[str],
                 start_time=start_date, end_time=end_date, freq="day",
             )
             if ret_df is None or ret_df.empty:
-                return False
+                return (False, None, None, None) if return_metrics else False
         finally:
             qlib_config.C["joblib_backend"] = orig_backend
 
@@ -131,7 +137,7 @@ def validate_factor(expression: str, universe: list[str],
         common = factor_s.index.intersection(ret_s.index)
         if len(common) < 30:
             logger.debug(f"validate_factor: {expression} 公共样本不足（{len(common)}）")
-            return False
+            return (False, None, None, None) if return_metrics else False
 
         factor_s = factor_s.reindex(common)
         ret_s    = ret_s.reindex(common)
@@ -161,13 +167,19 @@ def validate_factor(expression: str, universe: list[str],
 
         if not ic_list:
             logger.debug(f"validate_factor: {expression} IC 列表为空")
-            return False
+            return (False, None, None, None) if return_metrics else False
 
         import numpy as np
-        ic_mean = float(np.mean(ic_list))
+        arr = np.array(ic_list)
+        ic_mean = float(np.mean(arr))
+        ic_std  = float(np.std(arr))
+        sharpe  = float(ic_mean / ic_std * np.sqrt(252)) if ic_std > 1e-8 else 0.0
+        passed  = ic_mean >= threshold_ic
         logger.info(f"[因子验证] {expression[:40]}  IC均值={ic_mean:.4f}  "
-                    f"{'✅ 通过' if ic_mean >= threshold_ic else '❌ 未通过'}")
-        return ic_mean >= threshold_ic
+                    f"{'✅ 通过' if passed else '❌ 未通过'}")
+        if return_metrics:
+            return passed, ic_mean, ic_std, sharpe
+        return passed
 
     except Exception as e:
         err_s = str(e)
@@ -178,6 +190,8 @@ def validate_factor(expression: str, universe: list[str],
             )
         else:
             logger.warning(f"[因子验证] {expression[:40]} 验证异常：{e}")
+        if return_metrics:
+            return False, None, None, None
         return False
 
 
@@ -291,12 +305,18 @@ def get_valid_factors(
         pct = 15 + int(80 * i / total)
         source = "历史" if expr in existing_new else "新发现"
         _cb(pct, f"[{source}] 验证因子 {i+1}/{total}：{expr[:30]}...")
-        if validate_factor(expr, _VALIDATE_UNIVERSE, min_ic):
+        passed, ic_mean, ic_std, sharpe = validate_factor(
+            expr, _VALIDATE_UNIVERSE, min_ic, return_metrics=True
+        )
+        if passed:
             meta = _expr_meta.get(expr, {})
             valid_factors_list.append({
                 "expression":  expr,
                 "name":        meta.get("name", ""),
                 "description": meta.get("description", ""),
+                "ic_mean":     ic_mean,
+                "ic_std":      ic_std,
+                "sharpe":      sharpe,
             })
 
     _cb(97, f"验证完成：{len(valid_factors_list)}/{total} 个因子通过（含历史重验）")
@@ -320,10 +340,14 @@ def save_valid_factors(factors: list) -> None:
         if isinstance(f, str):
             factor_dicts.append({"expression": f, "name": "", "description": ""})
         else:
+            d = f if isinstance(f, dict) else {}
             factor_dicts.append({
-                "expression":  str(f.get("expression", f) if isinstance(f, dict) else f),
-                "name":        f.get("name", "") if isinstance(f, dict) else "",
-                "description": f.get("description", "") if isinstance(f, dict) else "",
+                "expression":  str(d.get("expression", f)),
+                "name":        d.get("name", ""),
+                "description": d.get("description", ""),
+                "ic_mean":     d.get("ic_mean"),
+                "ic_std":      d.get("ic_std"),
+                "sharpe":      d.get("sharpe"),
             })
 
     data = {

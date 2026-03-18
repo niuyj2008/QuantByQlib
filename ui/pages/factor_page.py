@@ -206,11 +206,21 @@ class FactorPage(QWidget):
         ff_layout.addWidget(self._inject_status_lbl)
 
         # ── 已注入因子清单（带 tooltip 通俗描述）──
+        injected_hdr_row = QHBoxLayout()
         injected_hdr = QLabel("已注入因子库：")
         injected_hdr.setStyleSheet(
             f"color:{COLORS['text_muted']}; font-size:11px; padding: 2px 0 0 0;"
         )
-        ff_layout.addWidget(injected_hdr)
+        injected_hdr_row.addWidget(injected_hdr)
+        injected_hdr_row.addStretch()
+        self._export_injected_btn = QPushButton("📥 导出")
+        self._export_injected_btn.setObjectName("btn_secondary")
+        self._export_injected_btn.setFixedHeight(24)
+        self._export_injected_btn.setEnabled(False)
+        self._export_injected_btn.setToolTip("将已注入因子库导出为 CSV")
+        self._export_injected_btn.clicked.connect(self._on_export_injected_factors)
+        injected_hdr_row.addWidget(self._export_injected_btn)
+        ff_layout.addLayout(injected_hdr_row)
 
         # 滚动区容纳因子标签列表
         scroll = QScrollArea()
@@ -300,10 +310,8 @@ class FactorPage(QWidget):
         """启动 RD-Agent Worker"""
         from workers.rdagent_worker import RDAgentWorker
         self._worker = RDAgentWorker()
-        self._worker.signals.log.connect(self._append_log)
-        self._worker.signals.completed.connect(self._on_completed)
-        self._worker.signals.failed.connect(self._on_failed)
-        self._worker.signals.stopped.connect(self._on_stopped)
+        # 所有信号已通过 EventBus 路由到对应回调（见 _connect_events），
+        # 此处不再重复连接 Worker signals，避免每条日志/事件触发两次
 
         self._start_btn.setEnabled(False)
         self._stop_btn.setEnabled(True)
@@ -477,6 +485,7 @@ class FactorPage(QWidget):
                 f"&#x2705; 已注入 {n} 个因子，下次选股将自动使用</span>"
             )
             self._build_factor_tags(valid_factors)
+            self._export_injected_btn.setEnabled(True)
         else:
             color_warn = COLORS["warning"]
             self._inject_status_lbl.setText(
@@ -484,6 +493,7 @@ class FactorPage(QWidget):
                 f"&#x26A0; 无因子通过 IC 验证（阈值 0.03），策略保持不变</span>"
             )
             self._build_factor_tags([])
+            self._export_injected_btn.setEnabled(False)
 
     def _on_inject_error(self, err: str) -> None:
         self._inject_progress.hide()
@@ -554,8 +564,10 @@ class FactorPage(QWidget):
                     f"上次注入（{ts}，{age_str}），共 {n} 个因子</span>"
                 )
                 self._build_factor_tags(status.get("factors", []))
+                self._export_injected_btn.setEnabled(True)
             else:
                 self._build_factor_tags([])
+                self._export_injected_btn.setEnabled(False)
         except Exception:
             pass
 
@@ -575,15 +587,53 @@ class FactorPage(QWidget):
             writer.writerow(["因子名", "表达式", "IC均值", "IC标准差", "Sharpe"])
             for item in self._factors:
                 if hasattr(item, "name"):
-                    writer.writerow([
-                        item.name, item.expression,
-                        f"{item.ic_mean:.4f}" if item.ic_mean is not None else "",
-                        f"{item.ic_std:.4f}"  if item.ic_std  is not None else "",
-                        f"{item.sharpe:.2f}"  if item.sharpe  is not None else "",
-                    ])
+                    # DiscoveredFactor dataclass
+                    ic_m = item.ic_mean
+                    ic_s = item.ic_std
+                    sh   = item.sharpe
                 else:
-                    writer.writerow([
-                        item.get("name", ""),
-                        item.get("expression", ""),
-                        "", "", "",
-                    ])
+                    # dict（来自 get_valid_factors 或历史会话）
+                    ic_m = item.get("ic_mean")
+                    ic_s = item.get("ic_std")
+                    sh   = item.get("sharpe")
+                    item_name = item.get("name", "")
+                    item_expr = item.get("expression", "")
+                writer.writerow([
+                    item.name        if hasattr(item, "name") else item_name,
+                    item.expression  if hasattr(item, "name") else item_expr,
+                    f"{ic_m:.4f}" if ic_m is not None else "",
+                    f"{ic_s:.4f}" if ic_s is not None else "",
+                    f"{sh:.2f}"   if sh   is not None else "",
+                ])
+
+    def _on_export_injected_factors(self) -> None:
+        """导出已注入因子库到 CSV（格式与已发现因子相同）"""
+        from PyQt6.QtWidgets import QFileDialog
+        import csv
+        try:
+            from strategies.factor_injector import get_inject_status
+            status = get_inject_status()
+            factors = status.get("factors", [])
+        except Exception:
+            factors = []
+        if not factors:
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "导出已注入因子库", "injected_factors.csv", "CSV 文件 (*.csv)"
+        )
+        if not path:
+            return
+        with open(path, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.writer(f)
+            writer.writerow(["因子名", "表达式", "IC均值", "IC标准差", "Sharpe"])
+            for item in factors:
+                ic_m = item.get("ic_mean")
+                ic_s = item.get("ic_std")
+                sh   = item.get("sharpe")
+                writer.writerow([
+                    item.get("name", ""),
+                    item.get("expression", ""),
+                    f"{ic_m:.4f}" if ic_m is not None else "",
+                    f"{ic_s:.4f}" if ic_s is not None else "",
+                    f"{sh:.2f}"   if sh   is not None else "",
+                ])

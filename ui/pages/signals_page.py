@@ -30,10 +30,20 @@ _STRENGTH_COLORS = {
 }
 
 
+_STRATEGY_NUMBER = {
+    "deep_learning":       1,
+    "intraday_profit":     2,
+    "growth_stocks":       3,
+    "market_adaptive":     4,
+    "pytorch_full_market": 5,
+}
+
+
 class SignalsPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._all_signals: list = []
+        self._strategy_key: str = ""
         self._setup_ui()
         self._connect_events()
 
@@ -125,7 +135,9 @@ class SignalsPage(QWidget):
 
     def _connect_events(self) -> None:
         from core.event_bus import get_event_bus
-        get_event_bus().screening_completed.connect(self._on_screening_completed)
+        bus = get_event_bus()
+        bus.screening_started.connect(lambda key: setattr(self, "_strategy_key", key))
+        bus.screening_completed.connect(self._on_screening_completed)
 
     def _on_screening_completed(self, results: list) -> None:
         """选股完成后自动生成并显示信号"""
@@ -252,8 +264,13 @@ class SignalsPage(QWidget):
             return
         from PyQt6.QtWidgets import QFileDialog
         import csv
+        from datetime import date
+        num = _STRATEGY_NUMBER.get(self._strategy_key, 0)
+        strategy_part = f"strategy{num}" if num else (self._strategy_key or "unknown")
+        date_part = date.today().strftime("%Y%m%d")
+        default_name = f"qlib_signals_{strategy_part}_{date_part}.csv"
         path, _ = QFileDialog.getSaveFileName(
-            self, "导出信号", "交易信号.csv", "CSV 文件 (*.csv)"
+            self, "导出信号", default_name, "CSV 文件 (*.csv)"
         )
         if not path:
             return

@@ -179,7 +179,8 @@ class YFinanceCollectorWorker(QRunnable):
             f"数据覆盖至 {new_trading_days[-1]}"
         )
         if failed_tickers:
-            summary += f"，{len(failed_tickers)} 支失败"
+            summary += f"，{len(failed_tickers)} 支真正失败（无历史数据且无法下载）"
+            self._log(f"[WARN] 失败 ticker 列表：{failed_tickers}")
         self._log(f"[INFO] {summary}")
         self.signals.completed.emit(True, summary)
 
@@ -240,6 +241,11 @@ class YFinanceCollectorWorker(QRunnable):
 
     # ── 股票列表 ─────────────────────────────────────────────
 
+    @staticmethod
+    def _normalize_ticker(ticker: str) -> str:
+        """标准化 ticker：将 Qlib 格式（BRK.B）转换为 yfinance 格式（BRK-B）"""
+        return ticker.replace(".", "-")
+
     def _get_tickers(self) -> list[str]:
         """从 instruments/ 文件读取股票列表，如不存在则使用内置列表"""
         inst_file = QLIB_DATA_DIR / "instruments" / f"{self.scope}.txt"
@@ -249,7 +255,7 @@ class YFinanceCollectorWorker(QRunnable):
             for line in lines:
                 parts = line.split("\t")
                 if parts:
-                    t = parts[0].strip().upper()
+                    t = self._normalize_ticker(parts[0].strip().upper())
                     if t and not t.startswith("^"):
                         tickers.append(t)
             if tickers:
@@ -301,25 +307,41 @@ class YFinanceCollectorWorker(QRunnable):
 
         written = 0
         failed = []
+        skipped_delisted = 0
 
         for ticker in tickers:
             if self._cancelled:
                 break
             try:
-                # 提取单个 ticker 的 DataFrame
-                if len(tickers) == 1:
-                    df = raw.copy()
-                    # 单个 ticker 时 columns 可能不是 MultiIndex
-                    if isinstance(df.columns, pd.MultiIndex):
-                        df.columns = df.columns.droplevel(1)
-                else:
-                    if ticker not in raw.columns.get_level_values(0):
-                        failed.append(ticker)
-                        continue
-                    df = raw[ticker].copy()
+                # 检查该 ticker 是否已有本地数据（退市股票）
+                feat_dir = QLIB_DATA_DIR / "features" / ticker.lower()
+                close_bin = feat_dir / "close.day.bin"
+                has_existing_data = close_bin.exists()
 
-                if df.empty or df["Close"].isna().all():
-                    failed.append(ticker)
+                # 提取单个 ticker 的 DataFrame
+                # 注意：yfinance group_by='ticker' 时，无论单支还是多支，
+                # MultiIndex 的 level 0 均为 ticker，level 1 为字段名
+                if isinstance(raw.columns, pd.MultiIndex):
+                    ticker_in_raw = ticker in raw.columns.get_level_values(0)
+                    if ticker_in_raw:
+                        df = raw[ticker].copy()
+                    else:
+                        df = pd.DataFrame()
+                else:
+                    # 极少数情况：单 ticker 且 yfinance 返回普通列（字段名为列名）
+                    ticker_in_raw = not raw.empty
+                    df = raw.copy() if ticker_in_raw else pd.DataFrame()
+
+                # 退市/被收购股票：yfinance 在追加窗口内无新数据属正常，跳过不算失败
+                if not ticker_in_raw or df.empty or df["Close"].isna().all():
+                    if has_existing_data:
+                        # 已有历史数据，只是无新数据（正常退市），追加 NaN 占位
+                        self._append_nan_for_delisted(ticker.lower(), date_to_idx, new_start_idx)
+                        skipped_delisted += 1
+                        written += 1  # 算作"已处理"，不计入失败
+                    else:
+                        # 真正失败：无历史数据也无新数据
+                        failed.append(ticker)
                     continue
 
                 # 计算 factor = Adj Close / Close
@@ -341,11 +363,17 @@ class YFinanceCollectorWorker(QRunnable):
                 if ok:
                     written += 1
                 else:
-                    failed.append(ticker)
+                    # 写入返回 False 通常是追加时无新数据（已是最新），若有历史数据也不算失败
+                    if has_existing_data:
+                        written += 1
+                    else:
+                        failed.append(ticker)
             except Exception as e:
                 logger.debug(f"{ticker} 写入失败：{e}")
                 failed.append(ticker)
 
+        if skipped_delisted:
+            logger.debug(f"已退市/停牌跳过（有历史数据）：{skipped_delisted} 支")
         return written, failed
 
     def _write_ticker_data(
@@ -423,6 +451,30 @@ class YFinanceCollectorWorker(QRunnable):
                 wrote_any = True
 
         return wrote_any
+
+    def _append_nan_for_delisted(
+        self,
+        ticker_lower: str,
+        date_to_idx: dict[date, int],
+        new_start_idx: int,
+    ) -> None:
+        """
+        为退市股票在新增交易日追加 NaN 占位，保持日历对齐。
+        只追加 index >= new_start_idx 的 NaN，不修改历史数据。
+        """
+        feat_dir = QLIB_DATA_DIR / "features" / ticker_lower
+        if not feat_dir.exists():
+            return
+        # 计算需要追加的 NaN 数量
+        new_dates_count = sum(1 for i in date_to_idx.values() if i >= new_start_idx)
+        if new_dates_count <= 0:
+            return
+        nan_arr = np.full(new_dates_count, np.nan, dtype="<f")
+        for field in FIELDS:
+            bin_file = feat_dir / f"{field}.day.bin"
+            if bin_file.exists():
+                with bin_file.open("ab") as f:
+                    nan_arr.tofile(f)
 
     def _extract_new_values(
         self,

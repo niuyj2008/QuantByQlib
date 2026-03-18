@@ -19,54 +19,140 @@ from ui.theme import COLORS
 # 策略定义
 STRATEGIES = [
     {
-        "key":  "deep_learning",
-        "name": "深度学习集成",
-        "icon": "🧠",
+        "key":   "deep_learning",
+        "name":  "深度学习集成",
+        "icon":  "🧠",
         "model": "Qlib LSTM（Alpha158，2层，hidden=64）",
-        "desc": "LSTM 时序模型捕捉价量非线性关系，适合中长期趋势跟踪",
-        "risk": "平衡型",
+        "desc":  "LSTM 时序模型捕捉价量非线性关系，适合中长期趋势跟踪",
+        "risk":  "平衡型",
         "risk_color": COLORS["warning"],
-        "topk": 50,
+        "topk":  50,
+        "tags":  ["训练2年", "CPU约5-8分钟", "不支持因子注入"],
+        "suitable":   "中长期趋势跟踪，市场方向明确时",
+        "unsuitable": "频繁换仓、短期波段",
+        "tooltip": (
+            "【深度学习集成 — LSTM】\n\n"
+            "原理：按时间顺序逐日「阅读」过去2年价量数据，从非线性序列中\n"
+            "      提炼规律，预测未来收益排名。\n\n"
+            "模型来源：微软 Qlib 官方 pytorch_lstm.LSTM\n"
+            "因子集：  Alpha158（158个技术因子）\n"
+            "架构：    2层 LSTM，隐藏层64维\n"
+            "训练窗口：504个交易日（约2年）\n"
+            "最大股票池：300支（防内存溢出）\n\n"
+            "✅ 适合：中长期趋势跟踪\n"
+            "❌ 不适合：频繁换仓、短期波段\n"
+            "⚠ 注意：不支持 RD-Agent 因子注入"
+        ),
     },
     {
-        "key":  "intraday_profit",
-        "name": "短线获利",
-        "icon": "⚡",
+        "key":   "intraday_profit",
+        "name":  "短线获利",
+        "icon":  "⚡",
         "model": "Qlib GRU（Alpha158，短窗口 126天训练）",
-        "desc": "GRU 捕捉短期动量效应，训练窗口短，适合活跃交易者",
-        "risk": "进取型",
+        "desc":  "GRU 捕捉短期动量效应，训练窗口短，适合活跃交易者",
+        "risk":  "进取型",
         "risk_color": COLORS["danger"],
-        "topk": 30,
+        "topk":  30,
+        "tags":  ["训练6个月", "Top 30支", "不支持因子注入"],
+        "suitable":   "短期动量，持仓1-2周",
+        "unsuitable": "长期持有、震荡市",
+        "tooltip": (
+            "【短线获利 — GRU】\n\n"
+            "原理：只看最近6个月行情，专门捕捉短期动量效应。\n"
+            "      GRU 比 LSTM 更轻量，对短序列反应更灵敏。\n\n"
+            "模型来源：微软 Qlib 官方 pytorch_gru.GRU\n"
+            "因子集：  Alpha158（158个技术因子）\n"
+            "架构：    2层 GRU，隐藏层64维\n"
+            "训练窗口：126个交易日（约6个月，是其他策略的1/4）\n"
+            "目标选出：Top 30支（比其他策略更集中）\n\n"
+            "GRU vs LSTM：GRU参数更少，短序列表现更好，训练更快\n\n"
+            "✅ 适合：活跃交易，持仓1-2周\n"
+            "❌ 不适合：长期持有、震荡市\n"
+            "⚠ 注意：不支持 RD-Agent 因子注入"
+        ),
     },
     {
-        "key":  "growth_stocks",
-        "name": "成长股选股",
-        "icon": "🌱",
+        "key":   "growth_stocks",
+        "name":  "成长股选股",
+        "icon":  "🌱",
         "model": "LightGBM（Alpha158，158个因子）",
-        "desc": "梯度提升树聚焦成长因子，适合中长期持有，回撤相对较小",
-        "risk": "稳健型",
+        "desc":  "梯度提升树聚焦成长因子，适合中长期持有，回撤相对较小",
+        "risk":  "稳健型",
         "risk_color": COLORS["success"],
-        "topk": 50,
+        "topk":  50,
+        "tags":  ["训练2年", "支持因子注入", "可解释性强"],
+        "suitable":   "稳健中长期持有，可配合自定义因子",
+        "unsuitable": "短期高频换仓",
+        "tooltip": (
+            "【成长股选股 — LightGBM】\n\n"
+            "原理：成千上万棵决策树集体投票，每棵树学习一个规则，\n"
+            "      所有树汇总给出最终评分。可解释性强，回撤控制好。\n\n"
+            "模型来源：微软 Qlib 官方 gbdt.LGBModel（LightGBM封装）\n"
+            "因子集：  Alpha158 + RD-Agent 注入的自定义因子\n"
+            "关键参数：max_depth=8, num_leaves=210, lr=0.0421\n"
+            "训练窗口：504个交易日（约2年）\n\n"
+            "因子注入方式：\n"
+            "  valid_factors.json 中的自定义因子\n"
+            "  → 通过 Qlib 计算特征值\n"
+            "  → 追加到 Alpha158（158列）后面一起训练\n\n"
+            "✅ 适合：稳健中长期持有，配合 RD-Agent 因子持续迭代\n"
+            "❌ 不适合：短期高频换仓"
+        ),
     },
     {
-        "key":  "market_adaptive",
-        "name": "市场自适应",
-        "icon": "🔄",
+        "key":   "market_adaptive",
+        "name":  "市场自适应",
+        "icon":  "🔄",
         "model": "LightGBM（Alpha158，牛熊自适应学习率）",
-        "desc": "检测市场政体自动切换学习率参数，适应不同市场周期",
-        "risk": "平衡型",
+        "desc":  "检测市场状态自动切换学习率参数，适应不同市场周期",
+        "risk":  "平衡型",
         "risk_color": COLORS["warning"],
-        "topk": 50,
+        "topk":  50,
+        "tags":  ["SPY牛熊检测", "支持因子注入", "动态学习率"],
+        "suitable":   "跨越牛熊周期长期使用",
+        "unsuitable": "网络不稳定环境（依赖SPY数据）",
+        "tooltip": (
+            "【市场自适应 — LightGBM + 牛熊切换】\n\n"
+            "原理：在成长股策略基础上，运行前先读取 SPY 最近60天表现，\n"
+            "      判断牛熊市，动态调整模型激进程度（学习率）。\n\n"
+            "模型来源：LGBModel（同成长股）\n"
+            "因子集：  Alpha158 + RD-Agent 注入的自定义因子\n\n"
+            "牛熊检测逻辑：\n"
+            "  SPY 近60日上涨 → 牛市 → 学习率 0.05（更激进）\n"
+            "  SPY 近60日下跌 → 熊市 → 学习率 0.03（更保守）\n\n"
+            "✅ 适合：跨越牛熊周期的长期使用\n"
+            "❌ 不适合：网络不通时（回退到固定参数）\n"
+            "⚠ 依赖：OpenBB/yfinance 拉取 SPY 数据"
+        ),
     },
     {
-        "key":  "pytorch_full_market",
-        "name": "全市场深度学习",
-        "icon": "🌐",
+        "key":   "pytorch_full_market",
+        "name":  "全市场深度学习",
+        "icon":  "🌐",
         "model": "Qlib LSTM（Alpha360，360个因子）",
-        "desc": "Alpha360 宽因子集 + LSTM，覆盖全市场蓝筹股，挖掘被忽视的机会",
-        "risk": "进取型",
+        "desc":  "Alpha360 宽因子集 + LSTM，覆盖全市场蓝筹股，挖掘被忽视的机会",
+        "risk":  "进取型",
         "risk_color": COLORS["danger"],
-        "topk": 50,
+        "topk":  50,
+        "tags":  ["360个因子", "训练最慢", "不支持因子注入"],
+        "suitable":   "挖掘冷门股，宽基全市场覆盖",
+        "unsuitable": "内存小的机器（360特征更耗资源）",
+        "tooltip": (
+            "【全市场深度学习 — LSTM + Alpha360】\n\n"
+            "原理：使用360个因子（是其他策略的2.3倍），覆盖更广的股票池，\n"
+            "      捕捉被常规策略忽视的全市场信号。\n\n"
+            "模型来源：微软 Qlib 官方 pytorch_lstm.LSTM\n"
+            "因子集：  Alpha360（360个因子 = Alpha158 + 高频微结构因子）\n"
+            "架构：    1层 LSTM，隐藏层128维（比策略1更宽但更浅）\n"
+            "训练轮数：8轮（特征多，收敛更快）\n"
+            "最大股票池：400支\n\n"
+            "Alpha158 vs Alpha360：\n"
+            "  Alpha158：标准技术因子，适合标普500蓝筹\n"
+            "  Alpha360：额外含高频微结构、多周期统计，适合全市场\n\n"
+            "✅ 适合：挖掘冷门股、中小盘，宽基全市场覆盖\n"
+            "❌ 不适合：内存 < 8GB 的机器\n"
+            "⚠ 注意：CPU训练约5-12分钟，不支持因子注入"
+        ),
     },
 ]
 
@@ -87,7 +173,11 @@ class StrategyCard(QFrame):
 
     def _setup_ui(self) -> None:
         layout = QVBoxLayout(self)
-        layout.setSpacing(6)
+        layout.setSpacing(5)
+
+        # 整张卡片的 tooltip（详细说明）
+        if self.config.get("tooltip"):
+            self.setToolTip(self.config["tooltip"])
 
         # 标题行
         title_row = QHBoxLayout()
@@ -124,12 +214,37 @@ class StrategyCard(QFrame):
         desc_lbl.setWordWrap(True)
         layout.addWidget(desc_lbl)
 
+        # 特性标签行（tags）
+        if self.config.get("tags"):
+            tags_row = QHBoxLayout()
+            tags_row.setSpacing(4)
+            for tag in self.config["tags"]:
+                tag_lbl = QLabel(tag)
+                tag_lbl.setStyleSheet(
+                    f"color: {COLORS['text_muted']}; "
+                    f"background: {COLORS['bg_card']}; "
+                    f"border: 1px solid {COLORS['border']}; "
+                    f"border-radius: 4px; padding: 1px 5px; font-size: 10px;"
+                )
+                tags_row.addWidget(tag_lbl)
+            tags_row.addStretch()
+            layout.addLayout(tags_row)
+
         layout.addStretch()
 
-        # 底部：选股数量
+        # 底部：适用场景 + 选股数量
+        bottom_row = QHBoxLayout()
         topk_lbl = QLabel(f"目标选出：Top {self.config['topk']} 支")
         topk_lbl.setStyleSheet(f"color: {COLORS['text_muted']}; font-size: 11px;")
-        layout.addWidget(topk_lbl)
+        bottom_row.addWidget(topk_lbl)
+        bottom_row.addStretch()
+        if self.config.get("suitable"):
+            hint_lbl = QLabel(f"适合：{self.config['suitable']}")
+            hint_lbl.setStyleSheet(f"color: {COLORS['text_muted']}; font-size: 10px;")
+            hint_lbl.setWordWrap(True)
+            hint_lbl.setAlignment(Qt.AlignmentFlag.AlignRight)
+            bottom_row.addWidget(hint_lbl)
+        layout.addLayout(bottom_row)
 
     def set_selected(self, selected: bool) -> None:
         self._is_selected = selected
