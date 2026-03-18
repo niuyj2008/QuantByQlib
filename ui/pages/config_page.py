@@ -63,11 +63,14 @@ class ConfigPage(QWidget):
         api_layout.setColumnStretch(1, 1)
 
         labels = [
-            ("FMP Key:",          "Financial Modeling Prep — 基本面/分析师评级（免费 250次/天）",   "FMP_API_KEY"),
-            ("Finnhub Key:",      "Finnhub — 新闻/情绪（免费 60次/分钟）",                        "FINNHUB_API_KEY"),
-            ("Alpha Vantage Key:","Alpha Vantage — K线历史数据（免费 25次/天）",                   "ALPHA_VANTAGE_API_KEY"),
-            ("DeepSeek Key:",     "DeepSeek API Key（sk-...）",                                  "DEEPSEEK_API_KEY"),
-            ("Anthropic Key:",    "Anthropic Claude API Key（sk-ant-...）— 用于 Claude 因子发现", "ANTHROPIC_API_KEY"),
+            ("FMP Key:",           "Financial Modeling Prep — 基本面/分析师评级（免费 250次/天）",   "FMP_API_KEY"),
+            ("Finnhub Key:",       "Finnhub — 新闻/情绪（免费 60次/分钟）",                        "FINNHUB_API_KEY"),
+            ("Alpha Vantage Key:", "Alpha Vantage — K线历史数据（免费 25次/天）",                   "ALPHA_VANTAGE_API_KEY"),
+            ("DeepSeek Key:",      "DeepSeek API Key（sk-...）",                                  "DEEPSEEK_API_KEY"),
+            ("Anthropic Key:",     "Anthropic Claude API Key（sk-ant-...）— 用于 Claude 因子发现", "ANTHROPIC_API_KEY"),
+            ("LongPort App Key:",  "长桥 App Key — open.longportapp.com 申请",                   "LONGPORT_APP_KEY"),
+            ("LongPort Secret:",   "长桥 App Secret",                                             "LONGPORT_APP_SECRET"),
+            ("LongPort Token:",    "长桥 Access Token（持仓账户行情权限）",                         "LONGPORT_ACCESS_TOKEN"),
         ]
 
         self._key_inputs: dict[str, QLineEdit] = {}

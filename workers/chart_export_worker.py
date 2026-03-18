@@ -77,20 +77,34 @@ class ChartExportWorker(QRunnable):
                     self.signals.progress.emit(pct, msg)
 
                     try:
-                        df = yf.download(
-                            ticker, progress=False, auto_adjust=True,
-                            period=params["period"], interval=params["interval"],
-                        )
+                        # 优先长桥，fallback yfinance
+                        df = None
+                        src = "yfinance"
+                        try:
+                            from data.longport_client import get_candlesticks, is_configured
+                            if is_configured():
+                                df = get_candlesticks(ticker, period_key)
+                                if df is not None and not df.empty:
+                                    src = "LongPort"
+                        except Exception:
+                            pass
+
+                        if df is None or df.empty:
+                            df = yf.download(
+                                ticker, progress=False, auto_adjust=True,
+                                period=params["period"], interval=params["interval"],
+                            )
+                            if df is not None and not df.empty:
+                                if hasattr(df.columns, "levels"):
+                                    df.columns = df.columns.get_level_values(0)
+                                df.index.name = "Date"
+
                         if df is None or df.empty:
                             logger.warning(f"[图表导出] {ticker} {label} 无数据，跳过")
                             done += 1
                             continue
 
-                        if hasattr(df.columns, "levels"):
-                            df.columns = df.columns.get_level_values(0)
-                        df.index.name = "Date"
-
-                        title = f"{ticker}  {label}"
+                        title = f"{ticker}  {label}  [{src}]"
                         save_path = self.output_dir / f"{ticker}_{period_key}.png"
 
                         fig, _ = mpf.plot(

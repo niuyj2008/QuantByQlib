@@ -20,10 +20,11 @@ class _FetchSignals(QObject):
 class _FetchWorker(QRunnable):
     """后台拉取 yfinance 数据"""
 
-    _PERIOD_PARAMS = {
-        "5d":  dict(period="5d",  interval="5m"),
-        "day": dict(period="60d", interval="1d"),
-        "week":dict(period="104wk", interval="1wk"),
+    # yfinance fallback 参数
+    _YF_PARAMS = {
+        "5d":  dict(period="5d",   interval="5m"),
+        "day": dict(period="60d",  interval="1d"),
+        "week":dict(period="104wk",interval="1wk"),
     }
 
     def __init__(self, ticker: str, period_key: str, signals: _FetchSignals):
@@ -35,19 +36,34 @@ class _FetchWorker(QRunnable):
 
     def run(self) -> None:
         try:
-            import yfinance as yf
-            params = self._PERIOD_PARAMS[self.period_key]
-            df = yf.download(self.ticker, progress=False, auto_adjust=True, **params)
+            df = self._fetch_longport() or self._fetch_yfinance()
             if df is None or df.empty:
                 self.signals.error.emit("无数据", self.period_key)
                 return
-            # 扁平化多级列（yfinance 新版）
-            if hasattr(df.columns, "levels"):
-                df.columns = df.columns.get_level_values(0)
-            df.index.name = "Date"
             self.signals.done.emit(df, self.period_key)
         except Exception as e:
             self.signals.error.emit(str(e), self.period_key)
+
+    def _fetch_longport(self):
+        """优先用长桥实时数据（需配置 Key）"""
+        try:
+            from data.longport_client import get_candlesticks, is_configured
+            if not is_configured():
+                return None
+            return get_candlesticks(self.ticker, self.period_key)
+        except Exception:
+            return None
+
+    def _fetch_yfinance(self):
+        """Fallback：yfinance 公共数据"""
+        import yfinance as yf
+        params = self._YF_PARAMS[self.period_key]
+        df = yf.download(self.ticker, progress=False, auto_adjust=True, **params)
+        if df is not None and not df.empty:
+            if hasattr(df.columns, "levels"):
+                df.columns = df.columns.get_level_values(0)
+            df.index.name = "Date"
+        return df
 
 
 class _ChartCanvas(QWidget):
@@ -98,8 +114,13 @@ class _ChartCanvas(QWidget):
             plt.rcParams["axes.unicode_minus"] = False   # 修复负号显示
             from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 
-            _TITLES = {"5d": "5D (5min K)", "day": "Daily (60d)", "week": "Weekly (2yr)"}
-            title = f"{self.ticker}  {_TITLES.get(period_key, period_key)}"
+            _TITLES = {"5d": "5D (5min)", "day": "Daily (60d)", "week": "Weekly (2yr)"}
+            try:
+                from data.longport_client import is_configured
+                src = "LongPort" if is_configured() else "yfinance"
+            except Exception:
+                src = "yfinance"
+            title = f"{self.ticker}  {_TITLES.get(period_key, period_key)}  [{src}]"
 
             style = mpf.make_mpf_style(
                 base_mpf_style="charles",
