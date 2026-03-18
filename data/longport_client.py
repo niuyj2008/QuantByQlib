@@ -41,9 +41,9 @@ def get_candlesticks(ticker: str, period_key: str) -> Optional[pd.DataFrame]:
     拉取 K 线数据并返回 mplfinance 兼容 DataFrame。
 
     period_key:
-      "5d"   → Min_5，最近 390 根（约 5 个交易日 × 78 根/天）
-      "day"  → Day，  最近 60 根
-      "week" → Week， 最近 104 根
+      "zoom" → Day，  取120根计算均线，展示最后20根（约1个月放大）
+      "day"  → Day，  取130根，展示最近90根（约4.5个月）
+      "week" → Week， 取80根，展示最近60根（约15个月）
 
     symbol 格式：长桥要求 "AAPL.US"（美股后缀 .US）
     """
@@ -55,9 +55,9 @@ def get_candlesticks(ticker: str, period_key: str) -> Optional[pd.DataFrame]:
         from longport.openapi import QuoteContext, Period, AdjustType
 
         _PERIOD_MAP = {
-            "5d":   (Period.Day,   30),   # 取30根日K，前端截取最后12根
-            "day":  (Period.Day,   60),
-            "week": (Period.Week, 104),
+            "zoom": (Period.Day,  120),  # 取120根日K计算均线，前端截取最后20根展示
+            "day":  (Period.Day,  130),  # 取130根，展示最近90根
+            "week": (Period.Week,  80),  # 取80根，展示最近60根
         }
         period, count = _PERIOD_MAP[period_key]
 
@@ -90,9 +90,10 @@ def get_candlesticks(ticker: str, period_key: str) -> Optional[pd.DataFrame]:
         df["Date"] = pd.to_datetime(df["Date"])
         df = df.set_index("Date").sort_index()
         df.index.name = "Date"
-        # 5d 放大图只取最近12根日K
-        if period_key == "5d":
-            df = df.tail(12)
+        _TAIL = {"zoom": 20, "day": 90, "week": 60}
+        tail_n = _TAIL.get(period_key)
+        if tail_n:
+            df = df.tail(tail_n)
         return df
 
     except Exception as e:

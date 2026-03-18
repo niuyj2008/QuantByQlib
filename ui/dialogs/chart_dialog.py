@@ -20,11 +20,14 @@ class _FetchSignals(QObject):
 class _FetchWorker(QRunnable):
     """后台拉取 yfinance 数据"""
 
-    # yfinance fallback 参数（5d 取30日日线再截取最后12根，不用分钟K）
+    # yfinance fallback 参数
+    # zoom：拉120根日K计算准确均线，展示最后20根
+    # day：90根日线（约4.5个月）
+    # week：60根周线（约15个月）
     _YF_PARAMS = {
-        "5d":  dict(period="30d",  interval="1d"),
-        "day": dict(period="60d",  interval="1d"),
-        "week":dict(period="104wk",interval="1wk"),
+        "zoom": dict(period="180d", interval="1d"),
+        "day":  dict(period="130d", interval="1d"),   # 130交易日≈6个月，保证90根
+        "week": dict(period="80wk", interval="1wk"),  # 80周保证60根
     }
 
     def __init__(self, ticker: str, period_key: str, signals: _FetchSignals):
@@ -65,9 +68,15 @@ class _FetchWorker(QRunnable):
             if hasattr(df.columns, "levels"):
                 df.columns = df.columns.get_level_values(0)
             df.index.name = "Date"
-            # 5d 图取最近12根日K（相当于约2.5周的放大窗口）
-            if self.period_key == "5d":
-                df = df.tail(12)
+            # zoom：用完整数据算均线，展示最后20根
+            if self.period_key == "zoom":
+                df = df.tail(20)
+            # day：展示最近90根
+            elif self.period_key == "day":
+                df = df.tail(90)
+            # week：展示最近60根
+            elif self.period_key == "week":
+                df = df.tail(60)
         return df
 
 
@@ -105,9 +114,9 @@ class _ChartCanvas(QWidget):
 
     # 各周期均线配置
     _MAV = {
-        "5d":   (5, 10, 20),        # 5日图：MA5 / MA10 / MA20（分钟K）
-        "day":  (5, 10, 20, 30),    # 日线：MA5 / MA10 / MA20 / MA30
-        "week": (5, 10, 20, 30),    # 周线：MA5 / MA10 / MA20 / MA30
+        "zoom": (5, 10, 20),        # 放大图：MA5/MA10/MA20（MA30数据点不足，不显示）
+        "day":  (5, 10, 20, 30),    # 日线：MA5/MA10/MA20/MA30
+        "week": (5, 10, 20, 30),    # 周线：MA5/MA10/MA20/MA30
     }
 
     def _on_data(self, df, period_key: str) -> None:
@@ -133,7 +142,11 @@ class _ChartCanvas(QWidget):
 
             from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 
-            _TITLES = {"5d": "近期日线 (12根)", "day": "Daily (60d)", "week": "Weekly (2yr)"}
+            _TITLES = {
+                "zoom": "Zoom (20d)",
+                "day":  "Daily (90d)",
+                "week": "Weekly (60wk)",
+            }
             try:
                 from data.longport_client import is_configured
                 src = "LongPort" if is_configured() else "yfinance"
@@ -153,7 +166,7 @@ class _ChartCanvas(QWidget):
                 figcolor="#FFFFFF",
                 gridcolor="#E2E4EA",
                 gridstyle="--",
-                mavcolors=["#F59E0B", "#3B82F6", "#EF4444", "#22C55E"],  # MA5橙/MA10蓝/MA20红/MA30绿
+                mavcolors=["#F59E0B", "#3B82F6", "#8B5CF6", "#EC4899"],  # MA5橙/MA10蓝/MA20紫/MA30粉
             )
 
             fig, axes = mpf.plot(
@@ -202,7 +215,7 @@ class ChartDialog(QDialog):
         self.resize(900, 580)
         self.setModal(False)   # 非模态，允许继续操作主窗口
         self._setup_ui()
-        # 默认加载第一个 tab
+        # 默认加载日线 tab
         self._canvases["day"].load()
 
     def _setup_ui(self) -> None:
@@ -214,12 +227,13 @@ class ChartDialog(QDialog):
         self._tabs = QTabWidget()
         self._canvases: dict[str, _ChartCanvas] = {}
 
-        for key, label in [("5d", "📅 5日图"), ("day", "📈 日线"), ("week", "📊 周线")]:
+        for key, label in [("zoom", "🔍 放大图"), ("day", "📈 日线"), ("week", "📊 周线")]:
             canvas = _ChartCanvas(self.ticker, key)
             self._canvases[key] = canvas
             self._tabs.addTab(canvas, label)
 
         self._tabs.currentChanged.connect(self._on_tab_changed)
+        self._tabs.setCurrentIndex(1)   # 默认显示日线 tab
         layout.addWidget(self._tabs)
 
         # 底部按钮行

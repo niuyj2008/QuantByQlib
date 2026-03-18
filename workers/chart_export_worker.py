@@ -22,9 +22,9 @@ class ChartExportWorker(QRunnable):
     """
 
     _PERIOD_PARAMS = {
-        "5d":   dict(period="30d",  interval="1d",  label="Recent12D"),
-        "day":  dict(period="60d",  interval="1d",  label="Daily"),
-        "week": dict(period="104wk",interval="1wk", label="Weekly"),
+        "zoom": dict(period="180d", interval="1d",  label="Zoom"),
+        "day":  dict(period="130d", interval="1d",  label="Daily"),
+        "week": dict(period="80wk", interval="1wk", label="Weekly"),
     }
 
     def __init__(self, tickers: list[str], output_dir: Path):
@@ -70,9 +70,14 @@ class ChartExportWorker(QRunnable):
                     continue
 
             _MAV = {
-                "5d":   (5, 10, 20),
+                "zoom": (5, 10, 20),
                 "day":  (5, 10, 20, 30),
                 "week": (5, 10, 20, 30),
+            }
+            _TAIL = {
+                "zoom": 20,   # 展示最后20根，均线基于完整拉取数据计算
+                "day":  90,   # 展示最近90根
+                "week": 60,   # 展示最近60根
             }
 
             style = mpf.make_mpf_style(
@@ -85,7 +90,7 @@ class ChartExportWorker(QRunnable):
                 figcolor="#FFFFFF",
                 gridcolor="#E2E4EA",
                 gridstyle="--",
-                mavcolors=["#F59E0B", "#3B82F6", "#EF4444", "#22C55E"],  # MA5橙/MA10蓝/MA20红/MA30绿
+                mavcolors=["#F59E0B", "#3B82F6", "#8B5CF6", "#EC4899"],  # MA5橙/MA10蓝/MA20紫/MA30粉
             )
 
             for ticker in self.tickers:
@@ -117,8 +122,9 @@ class ChartExportWorker(QRunnable):
                                 if hasattr(df.columns, "levels"):
                                     df.columns = df.columns.get_level_values(0)
                                 df.index.name = "Date"
-                                if period_key == "5d":
-                                    df = df.tail(12)
+                                tail_n = _TAIL.get(period_key)
+                                if tail_n:
+                                    df = df.tail(tail_n)
 
                         if df is None or df.empty:
                             logger.warning(f"[图表导出] {ticker} {label} 无数据，跳过")
@@ -139,14 +145,14 @@ class ChartExportWorker(QRunnable):
                             volume=True,
                             mav=mav,
                             returnfig=True,
-                            figsize=(12, 7),
+                            figsize=(14, 9),    # 1400×900 @ dpi=100
                             tight_layout=True,
                         )
                         if _cn_font:
                             for ax in fig.get_axes():
                                 for lbl in ax.get_xticklabels() + ax.get_yticklabels():
                                     lbl.set_fontproperties(_cn_font)
-                        fig.savefig(str(save_path), dpi=150, bbox_inches="tight")
+                        fig.savefig(str(save_path), dpi=100, bbox_inches="tight")
                         plt.close(fig)
                         logger.info(f"[图表导出] 已保存：{save_path}")
 
