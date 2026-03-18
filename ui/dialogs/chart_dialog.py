@@ -104,7 +104,7 @@ class _ChartCanvas(QWidget):
     _MAV = {
         "5d":   (5, 10, 20),        # 5日图：MA5 / MA10 / MA20（分钟K）
         "day":  (5, 10, 20, 30),    # 日线：MA5 / MA10 / MA20 / MA30
-        "week": (5, 10, 20),        # 周线：MA5 / MA10 / MA20
+        "week": (5, 10, 20, 30),    # 周线：MA5 / MA10 / MA20 / MA30
     }
 
     def _on_data(self, df, period_key: str) -> None:
@@ -150,7 +150,7 @@ class _ChartCanvas(QWidget):
                 figcolor="#FFFFFF",
                 gridcolor="#E2E4EA",
                 gridstyle="--",
-                mavcolors=["#F59E0B", "#3B82F6", "#8B5CF6", "#EC4899"],  # 均线颜色
+                mavcolors=["#F59E0B", "#3B82F6", "#EF4444", "#22C55E"],  # MA5橙/MA10蓝/MA20红/MA30绿
             )
 
             fig, axes = mpf.plot(
@@ -161,7 +161,7 @@ class _ChartCanvas(QWidget):
                 volume=True,
                 mav=mav,
                 returnfig=True,
-                figsize=(10, 6),
+                figsize=(12, 7),
                 tight_layout=True,
             )
 

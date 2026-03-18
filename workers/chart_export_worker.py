@@ -72,7 +72,7 @@ class ChartExportWorker(QRunnable):
             _MAV = {
                 "5d":   (5, 10, 20),
                 "day":  (5, 10, 20, 30),
-                "week": (5, 10, 20),
+                "week": (5, 10, 20, 30),
             }
 
             style = mpf.make_mpf_style(
@@ -85,7 +85,7 @@ class ChartExportWorker(QRunnable):
                 figcolor="#FFFFFF",
                 gridcolor="#E2E4EA",
                 gridstyle="--",
-                mavcolors=["#F59E0B", "#3B82F6", "#8B5CF6", "#EC4899"],
+                mavcolors=["#F59E0B", "#3B82F6", "#EF4444", "#22C55E"],  # MA5橙/MA10蓝/MA20红/MA30绿
             )
 
             for ticker in self.tickers:
