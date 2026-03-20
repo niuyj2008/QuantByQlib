@@ -68,11 +68,9 @@ class _FetchWorker(QRunnable):
             if hasattr(df.columns, "levels"):
                 df.columns = df.columns.get_level_values(0)
             df.index.name = "Date"
-            # zoom：用完整数据算均线，展示最后20根
-            if self.period_key == "zoom":
-                df = df.tail(20)
+            # zoom：保留完整数据，供 _on_data 用全量数据计算均线，xlim 控制显示范围
             # day：展示最近90根
-            elif self.period_key == "day":
+            if self.period_key == "day":
                 df = df.tail(90)
             # week：展示最近60根
             elif self.period_key == "week":
@@ -180,6 +178,13 @@ class _ChartCanvas(QWidget):
                 figsize=(12, 7),
                 tight_layout=True,
             )
+
+            # zoom：MA 基于完整数据计算，xlim 限制显示最后20根（确保 MA20 正确显示）
+            if period_key == "zoom":
+                n = len(df)
+                display = 20
+                for ax in axes:
+                    ax.set_xlim(n - display - 0.5, n - 0.5)
 
             # 对所有 axes 的 tick label 强制应用中文字体（修复 X 轴月份乱码）
             if _cn_font:

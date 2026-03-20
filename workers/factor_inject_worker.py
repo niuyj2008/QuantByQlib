@@ -27,10 +27,11 @@ class FactorInjectWorker(QRunnable):
       6. 发送完成信号 + EventBus 广播
     """
 
-    def __init__(self, min_ic: float = 0.03):
+    def __init__(self, min_ic: float = 0.03, max_sharpe: float = 50.0):
         super().__init__()
-        self.min_ic  = min_ic
-        self.signals = FactorInjectSignals()
+        self.min_ic    = min_ic
+        self.max_sharpe = max_sharpe
+        self.signals   = FactorInjectSignals()
         self.setAutoDelete(True)
 
     def run(self) -> None:
@@ -48,6 +49,7 @@ class FactorInjectWorker(QRunnable):
             from strategies.factor_injector import get_valid_factors, save_valid_factors
             valid_exprs = get_valid_factors(
                 min_ic=self.min_ic,
+                max_sharpe=self.max_sharpe,
                 progress_cb=cb,
             )
 

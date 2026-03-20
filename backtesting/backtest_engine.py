@@ -29,6 +29,7 @@ class BacktestConfig:
     hold_thresh:   float = 0.5        # 持有阈值
     init_capital:  float = 1_000_000  # 初始资金（美元）
     benchmark:     str   = "SPY"      # 基准指数
+    universe:      Optional[list[str]] = None  # 候选股票列表（None = Qlib 自动获取）
 
 
 @dataclass

@@ -53,6 +53,15 @@ class PortfolioPage(QWidget):
         self._export_charts_btn.clicked.connect(self._on_export_charts)
         header_row.addWidget(self._export_charts_btn)
 
+        self._daily_export_btn = QPushButton("🚀 每日数据导出")
+        self._daily_export_btn.setObjectName("btn_primary")
+        self._daily_export_btn.setToolTip(
+            "生成 K 线图 + 策略信号 CSV + Manifest，写入「美股交易日记/」\n"
+            "周日额外运行 HMM 政体识别，月末额外生成回测绩效报告"
+        )
+        self._daily_export_btn.clicked.connect(self._on_daily_export)
+        header_row.addWidget(self._daily_export_btn)
+
         buy_btn = QPushButton("📈 买入")
         buy_btn.clicked.connect(self._on_buy)
         header_row.addWidget(buy_btn)
@@ -673,3 +682,176 @@ class PortfolioPage(QWidget):
         progress.close()
         self._export_charts_btn.setEnabled(True)
         QMessageBox.critical(self, "导出失败", f"批量导出图表失败：\n{err}")
+
+    # ── 每日数据导出（F1-F5）──────────────────────────────────────────────
+
+    def _on_daily_export(self) -> None:
+        """
+        一键触发每日数据导出：
+          F1 图表 → ~/美股交易日记/pics/
+          F2 信号 → ~/美股交易日记/signals/
+          F3 HMM  → ~/美股交易日记/regime/（仅周日或手动勾选）
+          F4 回测 → ~/美股交易日记/backtest/（仅月末或手动勾选）
+          F5 Manifest → ~/美股交易日记/qlib_manifest.json
+        """
+        if not self._positions:
+            QMessageBox.information(self, "无持仓", "当前没有持仓记录。")
+            return
+
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QCheckBox, QDialogButtonBox, QLabel
+        from datetime import date
+
+        # 选项对话框
+        dlg = QDialog(self)
+        dlg.setWindowTitle("每日数据导出选项")
+        dlg.setMinimumWidth(340)
+        layout = QVBoxLayout(dlg)
+        layout.setSpacing(10)
+
+        layout.addWidget(QLabel("<b>选择要运行的模块：</b>"))
+
+        cb_charts  = QCheckBox("F1  K 线图（写入 pics/）")
+        cb_signals = QCheckBox("F2  策略信号 CSV（写入 signals/，需 Qlib 数据）")
+        cb_regime  = QCheckBox("F3  HMM 市场政体识别（写入 regime/，建议每周运行）")
+        cb_backtest= QCheckBox("F4  月度回测绩效报告（写入 backtest/，耗时较长）")
+
+        # 默认全部勾选，让用户按需取消
+        for cb in [cb_charts, cb_signals, cb_regime, cb_backtest]:
+            cb.setChecked(True)
+            layout.addWidget(cb)
+
+        layout.addWidget(QLabel(
+            "<small style='color:#9299B0;'>F2 需 Qlib 已初始化；F4 耗时约 5-10 分钟</small>"
+        ))
+
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        layout.addWidget(btns)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        tickers = [p["symbol"] for p in self._positions]
+        strategy_keys = ["deep_learning", "intraday_profit", "growth_stocks"]
+
+        progress = QProgressDialog(
+            "正在运行每日数据导出...", "取消", 0, 100, self
+        )
+        progress.setWindowTitle("每日数据导出")
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+
+        from workers.daily_export_worker import DailyExportWorker
+        worker = DailyExportWorker(
+            tickers=tickers,
+            strategy_keys=strategy_keys if cb_signals.isChecked() else None,
+            run_charts=cb_charts.isChecked(),
+            run_signals=cb_signals.isChecked(),
+            force_regime=cb_regime.isChecked(),
+            force_backtest=cb_backtest.isChecked(),
+        )
+        worker.signals.progress.connect(
+            lambda pct, msg: (
+                progress.setValue(pct),
+                progress.setLabelText(msg),
+            ) if not progress.wasCanceled() else None
+        )
+        worker.signals.completed.connect(
+            lambda d: self._on_daily_export_done(d, progress)
+        )
+        worker.signals.error.connect(
+            lambda e: self._on_daily_export_error(e, progress)
+        )
+        # Bug Fix #2：取消按钮立即恢复按钮可用，Worker 后台继续直至完成
+        progress.canceled.connect(lambda: self._daily_export_btn.setEnabled(True))
+        self._daily_export_btn.setEnabled(False)
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_daily_export_done(self, out_dir: str, progress: "QProgressDialog") -> None:
+        # Bug Fix #2：progress 可能已被用户取消关闭，安全关闭
+        try:
+            if not progress.wasCanceled():
+                progress.close()
+        except RuntimeError:
+            pass
+        self._daily_export_btn.setEnabled(True)
+
+        # Bug Fix #1：读取 manifest，展示真实的各模块执行结果
+        import json, subprocess, sys
+        from pathlib import Path
+
+        manifest_path = Path(out_dir) / "qlib_manifest.json"
+        has_errors = False
+        lines: list[str] = [f"输出目录：\n{out_dir}\n"]
+
+        if manifest_path.exists():
+            try:
+                m = json.loads(manifest_path.read_text(encoding="utf-8"))
+                gf = m.get("generated_files", {})
+
+                def _module_line(label: str, info: dict) -> str:
+                    st    = info.get("status", "?")
+                    ic    = {"success": "✅", "failed": "❌", "skipped": "⏭", "error": "❌"}.get(st, "❓")
+                    count = info.get("count", "")
+                    reason = info.get("reason", "")
+                    last  = info.get("last_available", "")
+                    detail = f"  ({count} 个文件)" if count else ""
+                    detail += f"  — {reason}" if reason else ""
+                    detail += f"  (最近: {last})" if last and st in ("skipped",) else ""
+                    return f"{ic} {label}: {st}{detail}"
+
+                lines.append(_module_line("F1 图表  ", gf.get("charts",   {})))
+                lines.append(_module_line("F2 信号  ", gf.get("signals",  {})))
+                lines.append(_module_line("F3 政体  ", gf.get("regime",   {})))
+                lines.append(_module_line("F4 回测  ", gf.get("backtest", {})))
+
+                errs = m.get("errors", [])
+                warns = m.get("warnings", [])
+                if errs:
+                    has_errors = True
+                    lines.append(f"\n⚠️ 错误（{len(errs)} 条）：")
+                    lines.extend(f"  • {e}" for e in errs[:8])
+                    if len(errs) > 8:
+                        lines.append(f"  … 共 {len(errs)} 条，详见日志")
+                if warns:
+                    lines.append(f"\n⚠️ 警告（{len(warns)} 条）：")
+                    lines.extend(f"  • {w}" for w in warns[:4])
+
+            except Exception as ex:
+                lines.append(f"\n（读取 manifest 失败：{ex}）")
+        else:
+            lines.append("\n⚠️ qlib_manifest.json 未生成，导出可能未执行")
+            has_errors = True
+
+        summary = "\n".join(lines)
+
+        # Bug Fix #3：只在有实际文件时打开文件夹
+        any_success = not has_errors and manifest_path.exists()
+        if any_success:
+            try:
+                if sys.platform == "darwin":
+                    subprocess.Popen(["open", out_dir])
+                elif sys.platform == "win32":
+                    subprocess.Popen(["explorer", out_dir])
+                else:
+                    subprocess.Popen(["xdg-open", out_dir])
+            except Exception:
+                pass
+
+        if has_errors:
+            QMessageBox.warning(self, "每日导出完成（含错误）", summary)
+        else:
+            QMessageBox.information(self, "每日导出完成 ✅", summary)
+
+    def _on_daily_export_error(self, err: str, progress: "QProgressDialog") -> None:
+        try:
+            if not progress.wasCanceled():
+                progress.close()
+        except RuntimeError:
+            pass
+        self._daily_export_btn.setEnabled(True)
+        QMessageBox.critical(self, "导出失败", f"每日数据导出失败：\n{err}")

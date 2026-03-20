@@ -17,8 +17,12 @@ class ChartExportSignals(QObject):
 class ChartExportWorker(QRunnable):
     """
     批量导出 K 线图到 output_dir。
-    tickers: 股票代码列表
-    output_dir: 保存目录（Path）
+
+    Parameters
+    ----------
+    tickers               : 股票代码列表
+    output_dir            : 主要保存目录（由用户通过文件对话框选择）
+    also_export_to_journal: 同时将图表同步到「美股交易日记/pics/」（供 Claude 消费）
     """
 
     _PERIOD_PARAMS = {
@@ -27,11 +31,13 @@ class ChartExportWorker(QRunnable):
         "week": dict(period="80wk", interval="1wk", label="Weekly"),
     }
 
-    def __init__(self, tickers: list[str], output_dir: Path):
+    def __init__(self, tickers: list[str], output_dir: Path,
+                 also_export_to_journal: bool = True):
         super().__init__()
-        self.tickers    = tickers
-        self.output_dir = output_dir
-        self.signals    = ChartExportSignals()
+        self.tickers                = tickers
+        self.output_dir             = output_dir
+        self.also_export_to_journal = also_export_to_journal
+        self.signals                = ChartExportSignals()
         self.setAutoDelete(True)
 
     def run(self) -> None:
@@ -75,7 +81,7 @@ class ChartExportWorker(QRunnable):
                 "week": (5, 10, 20, 30),
             }
             _TAIL = {
-                "zoom": 20,   # 展示最后20根，均线基于完整拉取数据计算
+                # zoom：不截断，保留完整数据供 MA 计算，xlim 控制显示范围
                 "day":  90,   # 展示最近90根
                 "week": 60,   # 展示最近60根
             }
@@ -134,10 +140,11 @@ class ChartExportWorker(QRunnable):
                         title = f"{ticker}  {label}  [{src}]"
                         from datetime import date
                         date_str = date.today().strftime("%Y%m%d")
-                        save_path = self.output_dir / f"{ticker}_{period_key}_{date_str}.png"
+                        fname     = f"{ticker}_{period_key}_{date_str}.png"
+                        save_path = self.output_dir / fname
 
                         mav = _MAV.get(period_key, (5, 20))
-                        fig, _ = mpf.plot(
+                        fig, axes = mpf.plot(
                             df,
                             type="candle",
                             style=style,
@@ -148,11 +155,29 @@ class ChartExportWorker(QRunnable):
                             figsize=(14, 9),    # 1400×900 @ dpi=100
                             tight_layout=True,
                         )
+                        # zoom：MA 基于完整数据计算，xlim 限制显示最后20根（确保 MA20 正确显示）
+                        # autoscale_view 消除成交量轴双层刻度
+                        if period_key == "zoom":
+                            n = len(df)
+                            for ax in axes:
+                                ax.set_xlim(n - 20 - 0.5, n - 0.5)
+                                ax.autoscale_view()
                         if _cn_font:
                             for ax in fig.get_axes():
                                 for lbl in ax.get_xticklabels() + ax.get_yticklabels():
                                     lbl.set_fontproperties(_cn_font)
                         fig.savefig(str(save_path), dpi=100, bbox_inches="tight")
+
+                        # 同步到「美股交易日记/pics/」
+                        if self.also_export_to_journal:
+                            try:
+                                from services.output_paths import get_pics_dir
+                                journal_path = get_pics_dir() / fname
+                                fig.savefig(str(journal_path), dpi=100, bbox_inches="tight")
+                                logger.info(f"[图表导出] Journal 同步：{journal_path}")
+                            except Exception as je:
+                                logger.warning(f"[图表导出] Journal 同步失败：{je}")
+
                         plt.close(fig)
                         logger.info(f"[图表导出] 已保存：{save_path}")
 

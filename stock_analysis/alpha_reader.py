@@ -31,6 +31,7 @@ class TechnicalSignal:
 
 
 # 要展示的 Alpha158 因子子集（对散户最有参考价值的）
+# key = 展示名（用于结果字典）, value = 中文标签
 DISPLAY_FACTORS: dict[str, str] = {
     # 价格动量
     "RESI5":  "5日超额收益",
@@ -57,6 +58,18 @@ DISPLAY_FACTORS: dict[str, str] = {
     "KDJ_D":  "KDJ-D 值",
     # RSI
     "RSI":    "RSI(14)",
+}
+
+# 部分展示名不是合法的 Qlib 表达式，需要映射到真实表达式
+# key = DISPLAY_FACTORS 的 key，value = 传给 D.features() 的 Qlib 表达式
+_QLIB_EXPR_OVERRIDE: dict[str, str] = {
+    "BETA5":  "BETA(5)",
+    "TURN5":  "TURN(5)",
+    "TURN20": "TURN(20)",
+    "MACD":   "EMA($close,12)-EMA($close,26)",
+    "KDJ_K":  "SLOPE($close,9)",   # 近似：用 9日斜率代替 KDJ-K
+    "KDJ_D":  "SLOPE($close,3)",   # 近似：用 3日斜率代替 KDJ-D
+    "RSI":    "RSI($close,14)",
 }
 
 # 信号解读规则（因子名 → 解读函数）
@@ -126,33 +139,49 @@ class Alpha158Reader:
 
         try:
             from qlib.data import D
-            import pandas as pd
+            import math
             from datetime import date, timedelta
 
-            fields = list(DISPLAY_FACTORS.keys())
             start_time = (date.today() - timedelta(days=60)).strftime("%Y-%m-%d")
             end_time   = date.today().strftime("%Y-%m-%d")
-            df = D.features(
-                [ticker.upper()],
-                fields,
-                start_time=start_time,
-                end_time=end_time,
-                freq="day",
-            )
-            if df is None or df.empty:
-                return {}
+            inst       = [ticker.upper()]
+            result: dict[str, float] = {}
 
-            # 取最新一行
-            latest = df.iloc[-1]
-            result = {}
-            for f in fields:
+            # ── 批次1：无需表达式覆盖的原生 Alpha158 字段（一次批量请求）──
+            native_names = [f for f in DISPLAY_FACTORS if f not in _QLIB_EXPR_OVERRIDE]
+            if native_names:
                 try:
-                    val = latest.get(f)
-                    if val is not None and not (hasattr(val, '__float__') and
-                                                 __import__('math').isnan(float(val))):
-                        result[f] = float(val)
+                    df = D.features(
+                        inst, native_names,
+                        start_time=start_time, end_time=end_time, freq="day",
+                    )
+                    if df is not None and not df.empty:
+                        latest = df.iloc[-1]
+                        for col in native_names:
+                            try:
+                                val = latest.get(col)
+                                if val is not None and not math.isnan(float(val)):
+                                    result[col] = float(val)
+                            except Exception:
+                                pass
+                except Exception as e:
+                    logger.debug(f"Alpha158 原生字段批量请求失败 {ticker}：{e}")
+
+            # ── 批次2：需要表达式覆盖的字段（逐个请求，避免一个失败拖累全部）──
+            for display_name, expr in _QLIB_EXPR_OVERRIDE.items():
+                try:
+                    df = D.features(
+                        inst, [expr],
+                        start_time=start_time, end_time=end_time, freq="day",
+                    )
+                    if df is None or df.empty:
+                        continue
+                    val = df.iloc[-1, 0]
+                    if not math.isnan(float(val)):
+                        result[display_name] = float(val)
                 except Exception:
                     pass
+
             return result
 
         except Exception as e:

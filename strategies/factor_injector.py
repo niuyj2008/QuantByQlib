@@ -15,8 +15,9 @@ from typing import Optional
 from loguru import logger
 
 VALID_FACTORS_FILE = Path.home() / ".quantbyqlib" / "valid_factors.json"
-IC_THRESHOLD = 0.03          # 业界通行：IC 均值 ≥ 0.03 视为有效因子
-VALIDATE_DAYS = 252          # 用最近 252 个交易日验证
+IC_THRESHOLD    = 0.03   # 业界通行：IC 均值 ≥ 0.03 视为有效因子
+SHARPE_MAX      = 50.0   # Sharpe 绝对值 > 50 视为过拟合，拒绝注入
+VALIDATE_DAYS   = 252    # 用最近 252 个交易日验证
 
 
 def _precheck_expression(expr: str) -> tuple[bool, str]:
@@ -197,6 +198,7 @@ def validate_factor(expression: str, universe: list[str],
 
 def get_valid_factors(
     min_ic: float = IC_THRESHOLD,
+    max_sharpe: float = SHARPE_MAX,
     progress_cb=None,
 ) -> list[dict]:
     """
@@ -309,6 +311,14 @@ def get_valid_factors(
             expr, _VALIDATE_UNIVERSE, min_ic, return_metrics=True
         )
         if passed:
+            # 过滤 Sharpe 异常高的因子（过拟合信号）
+            if sharpe is not None and abs(sharpe) > max_sharpe:
+                logger.warning(
+                    f"[因子注入] 拒绝过拟合因子 {expr[:40]}"
+                    f"  Sharpe={sharpe:.1f} > 阈值 {max_sharpe}"
+                    f"  （IC={ic_mean:.4f} 看似优秀但不可信）"
+                )
+                continue
             meta = _expr_meta.get(expr, {})
             valid_factors_list.append({
                 "expression":  expr,
@@ -319,9 +329,20 @@ def get_valid_factors(
                 "sharpe":      sharpe,
             })
 
-    _cb(97, f"验证完成：{len(valid_factors_list)}/{total} 个因子通过（含历史重验）")
-    logger.info(f"get_valid_factors: {len(valid_factors_list)} 个因子通过验证")
-    return valid_factors_list
+    # 按表达式去重（忽略空格差异），保留先出现的版本
+    seen_keys: set[str] = set()
+    deduped: list[dict] = []
+    for f in valid_factors_list:
+        key = f["expression"].replace(" ", "")
+        if key not in seen_keys:
+            seen_keys.add(key)
+            deduped.append(f)
+    if len(deduped) < len(valid_factors_list):
+        logger.info(f"get_valid_factors: 去重 {len(valid_factors_list) - len(deduped)} 个重复因子")
+
+    _cb(97, f"验证完成：{len(deduped)}/{total} 个因子通过（含历史重验）")
+    logger.info(f"get_valid_factors: {len(deduped)} 个因子通过验证")
+    return deduped
 
 
 def save_valid_factors(factors: list) -> None:

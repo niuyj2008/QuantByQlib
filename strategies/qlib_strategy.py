@@ -470,7 +470,7 @@ def _patch_pytorch_model_best_param(model) -> None:
 
 def _fit_with_extra_factors(model, dataset, extra_exprs: list[str],
                             universe_qlib: list[str],
-                            train_start_s: str, pred_end_s: str) -> None:
+                            train_start_s: str, pred_end_s: str):
     """
     将 RD-Agent 发现的自定义因子注入 LGBModel 训练（仅支持 LightGBM）。
     通过 D.features() 计算自定义因子 DataFrame，与 Alpha158 输出 concat 后
@@ -481,6 +481,11 @@ def _fit_with_extra_factors(model, dataset, extra_exprs: list[str],
       2. 同时用 D.features() 加载自定义因子，追加到 LGB 的 train_x 中
       3. 由于 LGBModel.fit() 内部调用 dataset.prepare()，
          此处通过 monkey-patch dataset 的 prepare 方法在返回数据时追加列。
+
+    Returns
+    -------
+    callable or None
+        patched_prepare 函数（供 predict 阶段继续使用），失败时返回 None。
     """
     from qlib.data import D
     import numpy as np
@@ -495,12 +500,12 @@ def _fit_with_extra_factors(model, dataset, extra_exprs: list[str],
     except Exception as e:
         logger.warning(f"[因子注入] D.features 加载自定义因子失败：{e}，跳过注入")
         model.fit(dataset)
-        return
+        return None
 
     if custom_df is None or custom_df.empty:
         logger.warning("[因子注入] 自定义因子数据为空，跳过注入")
         model.fit(dataset)
-        return
+        return None
 
     # 重命名列，避免与 Alpha158 特征名冲突
     custom_df.columns = [f"_extra_{i}" for i in range(len(custom_df.columns))]
@@ -559,9 +564,13 @@ def _fit_with_extra_factors(model, dataset, extra_exprs: list[str],
 
     try:
         model.fit(dataset)
-    finally:
-        # 恢复原始 prepare
+    except Exception:
+        # fit 失败时恢复，再向上抛
         dataset.prepare = original_prepare
+        raise
+
+    # 注意：不在此处恢复 prepare，调用方需在 predict 结束后再恢复
+    return patched_prepare
 
 
 def _run_with_qlib_or_fallback(
@@ -642,6 +651,8 @@ def _run_with_qlib_or_fallback(
         _patch_pytorch_model_best_param(model)
 
         # LightGBM：若有自定义因子则注入训练特征
+        _patched_prepare = None
+        _original_prepare = dataset.prepare  # 保留原始引用，用于后续恢复
         if extra_exprs and is_lgb:
             cb(32, f"注入 {len(extra_exprs)} 个自定义因子到训练特征...")
             universe_qlib = [t.lower() for t in universe]
@@ -654,16 +665,23 @@ def _run_with_qlib_or_fallback(
             test_start  = anchor - _td(days=int(test_days * 1.5))
             valid_start = test_start - _td(days=int(valid_days * 1.5))
             train_start = valid_start - _td(days=int(train_days * 1.5))
-            _fit_with_extra_factors(
+            _patched_prepare = _fit_with_extra_factors(
                 model, dataset, extra_exprs,
                 universe_qlib,
                 train_start.isoformat(), pred_end.isoformat(),
             )
+            # _fit_with_extra_factors 成功时 dataset.prepare 仍是 patched 版本，
+            # 保持不变让 predict 也能看到额外因子列
         else:
             model.fit(dataset)
 
         cb(75, "生成预测分数...")
-        pred = model.predict(dataset, segment="test")
+        try:
+            pred = model.predict(dataset, segment="test")
+        finally:
+            # predict 完成后无论成功/失败，都恢复原始 prepare
+            if _patched_prepare is not None:
+                dataset.prepare = _original_prepare
 
         # LSTM/GRU 在输入含 NaN 特征时输出为 NaN；
         # 对每支股票取其最近非 NaN 预测，或用该批均值填充

@@ -446,7 +446,15 @@ class FactorPage(QWidget):
                 ))
             self._factor_table.setItem(row, 2, ic_item)
 
-            sharpe_item = QTableWidgetItem(f"{sharpe:.2f}" if sharpe is not None else "--")
+            if sharpe is not None and abs(sharpe) > 50:
+                sharpe_item = QTableWidgetItem(f"{sharpe:.1f} ⚠")
+                sharpe_item.setForeground(QColor(COLORS["warning"]))
+                sharpe_item.setToolTip(
+                    f"Sharpe={sharpe:.1f} 异常高，疑似样本内过拟合（阈值 ±50）\n"
+                    "注入时将自动过滤此因子"
+                )
+            else:
+                sharpe_item = QTableWidgetItem(f"{sharpe:.2f}" if sharpe is not None else "--")
             sharpe_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self._factor_table.setItem(row, 3, sharpe_item)
 

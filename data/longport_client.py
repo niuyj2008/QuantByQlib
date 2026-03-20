@@ -90,7 +90,9 @@ def get_candlesticks(ticker: str, period_key: str) -> Optional[pd.DataFrame]:
         df["Date"] = pd.to_datetime(df["Date"])
         df = df.set_index("Date").sort_index()
         df.index.name = "Date"
-        _TAIL = {"zoom": 20, "day": 90, "week": 60}
+        # zoom：返回完整数据供调用方计算准确均线，由调用方控制显示范围
+        # day/week：截取展示根数
+        _TAIL = {"day": 90, "week": 60}
         tail_n = _TAIL.get(period_key)
         if tail_n:
             df = df.tail(tail_n)

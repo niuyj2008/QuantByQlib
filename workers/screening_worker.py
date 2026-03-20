@@ -77,6 +77,17 @@ class ScreeningWorker(QRunnable):
             except Exception:
                 pass
 
+            # 自动写入规范化信号 CSV 到「美股交易日记/signals/」
+            try:
+                from services.signal_exporter import export_signals, export_signals_empty
+                sig_path = export_signals(self.strategy_key, results) if results \
+                    else export_signals_empty(self.strategy_key)
+                logger.info(f"ScreeningWorker [{self.strategy_key}] 信号 CSV → {sig_path}")
+            except Exception as ex:
+                logger.warning(
+                    f"ScreeningWorker [{self.strategy_key}] 信号 CSV 写入失败（非致命）：{ex}"
+                )
+
             logger.info(f"ScreeningWorker [{self.strategy_key}] 完成，{len(results)} 支")
 
         except InterruptedError as e:
