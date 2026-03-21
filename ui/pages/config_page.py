@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QLineEdit, QGroupBox, QGridLayout,
     QProgressBar, QTextEdit, QScrollArea, QFrame,
     QSizePolicy, QMessageBox, QTableWidget, QTableWidgetItem,
-    QHeaderView, QComboBox
+    QHeaderView, QComboBox, QFileDialog
 )
 from PyQt6.QtCore import Qt, QThreadPool
 from PyQt6.QtGui import QColor
@@ -295,6 +295,47 @@ class ConfigPage(QWidget):
 
         collect_layout.addLayout(col_btn_row)
         layout.addWidget(collect_group)
+
+        # ── 每日导出目录配置 ──────────────────────────────
+        export_group = QGroupBox("每日数据导出目录配置")
+        export_layout = QGridLayout(export_group)
+        export_layout.setSpacing(8)
+        export_layout.setColumnStretch(1, 1)
+
+        export_dirs = [
+            ("根目录：",       "TRADING_JOURNAL_DIR",  "~/美股交易日记",         "K线图/信号/政体/回测等所有导出文件的根目录"),
+            ("K线图目录：",    "EXPORT_PICS_DIR",      "（默认：根目录/pics）",   "每日导出 K线图 PNG 的存放目录"),
+            ("信号CSV目录：",  "EXPORT_SIGNALS_DIR",   "（默认：根目录/signals）","策略选股信号 CSV 的存放目录"),
+            ("HMM政体目录：",  "EXPORT_REGIME_DIR",    "（默认：根目录/regime）", "HMM 市场政体 JSON 的存放目录"),
+            ("回测报告目录：", "EXPORT_BACKTEST_DIR",  "（默认：根目录/backtest）","月度回测绩效 JSON 的存放目录"),
+        ]
+
+        self._export_dir_inputs: dict[str, QLineEdit] = {}
+        for i, (lbl_text, env_key, placeholder, tooltip) in enumerate(export_dirs):
+            lbl = QLabel(lbl_text)
+            lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            export_layout.addWidget(lbl, i, 0)
+
+            inp = QLineEdit()
+            inp.setPlaceholderText(placeholder)
+            inp.setToolTip(tooltip)
+            export_layout.addWidget(inp, i, 1)
+            self._export_dir_inputs[env_key] = inp
+
+            browse_btn = QPushButton("📂")
+            browse_btn.setFixedWidth(36)
+            browse_btn.setToolTip("浏览选择目录")
+            browse_btn.clicked.connect(lambda checked, e=env_key: self._on_browse_dir(e))
+            export_layout.addWidget(browse_btn, i, 2)
+
+        export_hint = QLabel(
+            "留空则使用默认路径。修改后点击「保存配置」立即生效，下次导出将写入新目录。"
+        )
+        export_hint.setStyleSheet(f"color: {COLORS['text_muted']}; font-size: 12px;")
+        export_hint.setWordWrap(True)
+        export_layout.addWidget(export_hint, len(export_dirs), 0, 1, 3)
+
+        layout.addWidget(export_group)
         layout.addStretch()
 
     # ── 数据加载 ───────────────────────────────────────────
@@ -330,6 +371,11 @@ class ConfigPage(QWidget):
             model_id = saved_model.split("/")[-1]  # 兼容 "deepseek/deepseek-chat" 格式
             if model_id in self._LLM_MODEL_IDS:
                 self._llm_combo.setCurrentIndex(self._LLM_MODEL_IDS.index(model_id))
+            # 恢复导出目录
+            for env_key, inp in self._export_dir_inputs.items():
+                val = vals.get(env_key, "")
+                if val:
+                    inp.setText(val)
         except Exception as e:
             from loguru import logger
             logger.debug(f"加载 .env 失败：{e}")
@@ -381,6 +427,17 @@ class ConfigPage(QWidget):
         selected_model = self._LLM_MODEL_IDS[self._llm_combo.currentIndex()]
         existing["CHAT_MODEL"] = selected_model
         os.environ["CHAT_MODEL"] = selected_model
+
+        # 保存导出目录
+        for env_key, inp in self._export_dir_inputs.items():
+            val = inp.text().strip()
+            if val:
+                existing[env_key] = val
+                os.environ[env_key] = val
+            elif env_key in existing:
+                # 用户清空则删除，回退默认
+                del existing[env_key]
+                os.environ.pop(env_key, None)
 
         with open(env_path, "w", encoding="utf-8") as f:
             for k, v in existing.items():
@@ -451,6 +508,17 @@ class ConfigPage(QWidget):
     def _reset_test_btn(self) -> None:
         self._test_btn.setEnabled(True)
         self._test_btn.setText("🔗 测试连接")
+
+    # ── 导出目录浏览 ───────────────────────────────────────
+
+    def _on_browse_dir(self, env_key: str) -> None:
+        inp = self._export_dir_inputs.get(env_key)
+        if inp is None:
+            return
+        start = inp.text().strip() or str(Path.home())
+        chosen = QFileDialog.getExistingDirectory(self, "选择目录", start)
+        if chosen:
+            inp.setText(chosen)
 
     # ── Qlib 数据下载 ─────────────────────────────────────
 

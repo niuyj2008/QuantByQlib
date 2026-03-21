@@ -10,6 +10,13 @@
     backtest/      # F4 回测绩效 JSON
     skills/        # Claude Skill 定义
     qlib_manifest.json
+
+可通过 .env 中以下变量单独覆盖每个子目录：
+  TRADING_JOURNAL_DIR   根目录（默认 ~/美股交易日记）
+  EXPORT_PICS_DIR       K线图目录
+  EXPORT_SIGNALS_DIR    信号 CSV 目录
+  EXPORT_REGIME_DIR     HMM 政体 JSON 目录
+  EXPORT_BACKTEST_DIR   回测绩效 JSON 目录
 """
 from __future__ import annotations
 
@@ -23,8 +30,15 @@ def _resolve_root() -> Path:
     env = os.environ.get("TRADING_JOURNAL_DIR", "").strip()
     if env:
         return Path(env).expanduser().resolve()
-    # 默认：~/美股交易日记
     return Path.home() / "美股交易日记"
+
+
+def _resolve_subdir(env_key: str, default_name: str) -> Path:
+    """读取独立目录环境变量；未配置则回退到根目录下的 default_name 子目录。"""
+    env = os.environ.get(env_key, "").strip()
+    if env:
+        return Path(env).expanduser().resolve()
+    return _resolve_root() / default_name
 
 
 def get_root() -> Path:
@@ -35,26 +49,26 @@ def get_root() -> Path:
 
 
 def get_pics_dir() -> Path:
-    d = get_root() / "pics"
-    d.mkdir(exist_ok=True)
+    d = _resolve_subdir("EXPORT_PICS_DIR", "pics")
+    d.mkdir(parents=True, exist_ok=True)
     return d
 
 
 def get_signals_dir() -> Path:
-    d = get_root() / "signals"
-    d.mkdir(exist_ok=True)
+    d = _resolve_subdir("EXPORT_SIGNALS_DIR", "signals")
+    d.mkdir(parents=True, exist_ok=True)
     return d
 
 
 def get_regime_dir() -> Path:
-    d = get_root() / "regime"
-    d.mkdir(exist_ok=True)
+    d = _resolve_subdir("EXPORT_REGIME_DIR", "regime")
+    d.mkdir(parents=True, exist_ok=True)
     return d
 
 
 def get_backtest_dir() -> Path:
-    d = get_root() / "backtest"
-    d.mkdir(exist_ok=True)
+    d = _resolve_subdir("EXPORT_BACKTEST_DIR", "backtest")
+    d.mkdir(parents=True, exist_ok=True)
     return d
 
 
