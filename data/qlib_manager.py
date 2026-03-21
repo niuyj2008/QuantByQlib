@@ -63,16 +63,20 @@ def init_qlib(provider_uri: Optional[str] = None) -> bool:
         from qlib.constant import REG_US
         qlib.init(provider_uri=uri, region=REG_US)
         logger.info(f"Qlib 初始化成功：{uri}")
-        # 更新全局应用状态
-        try:
-            from core.app_state import get_state
-            get_state().qlib_initialized = True
-        except Exception:
-            pass
-        return True
     except Exception as e:
-        logger.error(f"Qlib 初始化失败：{e}")
-        return False
+        msg = str(e)
+        # Qlib 已经初始化过（QlibRecorder 激活状态下不允许重复 init），视为成功
+        if "reinitialize" in msg or "QlibRecorder" in msg:
+            logger.info(f"Qlib 已初始化，跳过重复 init（{uri}）")
+        else:
+            logger.error(f"Qlib 初始化失败：{e}")
+            return False
+    try:
+        from core.app_state import get_state
+        get_state().qlib_initialized = True
+    except Exception:
+        pass
+    return True
 
 
 def auto_init_if_data_ready() -> bool:
