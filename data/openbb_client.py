@@ -120,37 +120,53 @@ def get_latest_quote(ticker: str) -> Optional[dict]:
 def _get_realtime_quote_yf(ticker: str) -> Optional[dict]:
     """
     用 yfinance 获取单只股票的最新价格（含盘前/盘中/盘后）
-    使用 history(interval="1m", prepost=True) 取最新1分钟K线收盘价，无缓存延迟
-    涨跌幅基准：上一个交易日收盘价（fast_info.previous_close）
+    优先：history(interval="1m", prepost=True) 取最新1分钟K线收盘价
+    降级：fast_info.last_price（非交易时间/周末分钟数据为空时）
+    涨跌幅基准：fast_info.previous_close
     """
     try:
         import yfinance as yf
         import pytz
-        t = yf.Ticker(ticker)
+        t = yf.Ticker(ticker.lstrip("$"))  # 兼容带 $ 前缀的 ticker
 
-        # 1分钟K线含盘前/盘后，取最后一条即为最新成交价
-        hist = t.history(period="1d", interval="1m", prepost=True)
-        if hist.empty:
-            return None
-        last_price = float(hist["Close"].iloc[-1])
-        if last_price != last_price:  # NaN check
-            return None
+        last_price = None
+        is_extended = False
 
-        # 判断是否处于盘外时段（盘前04:00-09:30 或 盘后16:00-20:00 美东）
-        last_ts = hist.index[-1]
+        # 尝试分钟K线（盘中/盘前/盘后最准确）
         try:
-            et = pytz.timezone("America/New_York")
-            last_et = last_ts.astimezone(et)
-            h, m = last_et.hour, last_et.minute
-            in_regular = (h == 9 and m >= 30) or (10 <= h < 16)
-            is_extended = not in_regular
+            hist = t.history(period="1d", interval="1m", prepost=True)
+            if not hist.empty:
+                price_candidate = float(hist["Close"].iloc[-1])
+                if price_candidate == price_candidate:  # NaN check
+                    last_price = price_candidate
+                    last_ts = hist.index[-1]
+                    try:
+                        et = pytz.timezone("America/New_York")
+                        last_et = last_ts.astimezone(et)
+                        h, m = last_et.hour, last_et.minute
+                        in_regular = (h == 9 and m >= 30) or (10 <= h < 16)
+                        is_extended = not in_regular
+                    except Exception:
+                        is_extended = False
         except Exception:
-            is_extended = False
+            pass
 
-        # 上一交易日收盘价用于涨跌幅计算
+        # 降级：fast_info（非交易时间分钟数据为空时）
+        if last_price is None:
+            fi = t.fast_info
+            raw = getattr(fi, "last_price", None)
+            if raw is not None:
+                last_price = float(raw)
+            # 非交易时间视为盘外
+            is_extended = True
+
+        if last_price is None:
+            return None
+
+        # 涨跌幅
         prev_close = getattr(t.fast_info, "previous_close", None)
         change_pct = None
-        if prev_close and prev_close > 0:
+        if prev_close and float(prev_close) > 0:
             change_pct = (last_price - float(prev_close)) / float(prev_close) * 100
 
         return {
