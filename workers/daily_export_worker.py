@@ -102,6 +102,13 @@ class DailyExportWorker(QRunnable):
         else:
             mb.set_charts(status="skipped", reason="未配置股票或已禁用")
 
+        # ── F1b：VPVR 筹码峰图 ────────────────────────────────────────────
+        if self.run_charts and self.tickers:
+            self._emit(36, f"F1b 生成 VPVR 筹码峰图（{len(self.tickers)} 支股票）...")
+            vpvr_files, vpvr_errors = self._run_vpvr(d)
+            for e in vpvr_errors:
+                mb.add_error(e)
+
         # ── F2：策略信号 CSV ──────────────────────────────────────────────
         signal_files: list[str] = []
 
@@ -367,6 +374,287 @@ class DailyExportWorker(QRunnable):
                     files.append(str(p))
                 except Exception:
                     pass
+
+        return files, errors
+
+    def _run_vpvr(self, d: date) -> tuple[list[str], list[str]]:
+        """
+        生成 Volume Profile Visible Range (VPVR) 筹码峰图。
+        数据：252 个交易日日线 OHLCV（约 1 年）
+        价格区间：(High-Low) / 100 bins，按 (H+L+C)/3 典型价聚合成交量
+        输出：pics/{TICKER}_vpvr_{YYYYMMDD}.png，与 K 线图同目录
+        """
+        from services.output_paths import get_pics_dir
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import matplotlib.patches as mpatches
+        import matplotlib.font_manager as fm
+        import numpy as np
+        import yfinance as yf
+        import pandas as pd
+
+        pics_dir = get_pics_dir()
+        date_str = d.strftime("%Y%m%d")
+        files: list[str] = []
+        errors: list[str] = []
+
+        # 中文字体
+        _cn_font = None
+        for _fname in ["PingFang HK", "PingFang SC", "STHeiti",
+                       "Heiti TC", "Arial Unicode MS"]:
+            try:
+                _fp = fm.FontProperties(family=_fname)
+                if fm.findfont(_fp, fallback_to_default=False):
+                    _cn_font = _fp
+                    plt.rcParams["font.family"] = _fname
+                    break
+            except Exception:
+                pass
+        plt.rcParams["axes.unicode_minus"] = False
+
+        for ticker in self.tickers:
+            try:
+                # ── 1. 获取数据（252 交易日 ≈ 1 年）─────────────────────
+                df = None
+                try:
+                    from data.longport_client import get_candlesticks, is_configured
+                    if is_configured():
+                        df = get_candlesticks(ticker, "day")  # 130d，够用
+                except Exception:
+                    pass
+
+                if df is None or df.empty:
+                    raw = yf.download(
+                        ticker, period="252d", interval="1d",
+                        progress=False, auto_adjust=True,
+                    )
+                    if raw is not None and not raw.empty:
+                        if hasattr(raw.columns, "levels"):
+                            raw.columns = raw.columns.get_level_values(0)
+                        raw.index.name = "Date"
+                        df = raw
+
+                if df is None or df.empty or len(df) < 10:
+                    errors.append(f"{ticker} vpvr 无数据")
+                    continue
+
+                # ── 2. Volume Profile 计算 ────────────────────────────────
+                # 典型价（Typical Price）= (H + L + C) / 3
+                hi = df["High"].astype(float)
+                lo = df["Low"].astype(float)
+                cl = df["Close"].astype(float)
+                vol = df["Volume"].astype(float)
+                tp = (hi + lo + cl) / 3.0
+
+                price_min = lo.min()
+                price_max = hi.max()
+                n_bins = 100
+                bins = np.linspace(price_min, price_max, n_bins + 1)
+                bin_centers = (bins[:-1] + bins[1:]) / 2
+
+                # 每根 K 线按典型价落入 bin，成交量归属该 bin
+                bin_idx = np.digitize(tp.values, bins) - 1
+                bin_idx = np.clip(bin_idx, 0, n_bins - 1)
+
+                vol_profile = np.zeros(n_bins)
+                for i, v in zip(bin_idx, vol.values):
+                    vol_profile[i] += v
+
+                # ── 3. 关键价位 ───────────────────────────────────────────
+                poc_idx   = int(np.argmax(vol_profile))          # Point of Control
+                poc_price = bin_centers[poc_idx]
+
+                cum_vol   = np.cumsum(vol_profile)
+                total_vol = cum_vol[-1]
+                val_lvl   = 0.0  # Value Area Low  (70% 以下边界)
+                vah_lvl   = 0.0  # Value Area High (70% 以上边界)
+
+                # Value Area = 中心向两侧扩展到 70% 总成交量
+                va_target = total_vol * 0.70
+                lo_idx, hi_idx = poc_idx, poc_idx
+                va_vol = vol_profile[poc_idx]
+                while va_vol < va_target:
+                    can_lo = lo_idx > 0
+                    can_hi = hi_idx < n_bins - 1
+                    if not can_lo and not can_hi:
+                        break
+                    add_lo = vol_profile[lo_idx - 1] if can_lo else 0
+                    add_hi = vol_profile[hi_idx + 1] if can_hi else 0
+                    if add_lo >= add_hi and can_lo:
+                        lo_idx -= 1
+                        va_vol += vol_profile[lo_idx]
+                    elif can_hi:
+                        hi_idx += 1
+                        va_vol += vol_profile[hi_idx]
+                    else:
+                        lo_idx -= 1
+                        va_vol += vol_profile[lo_idx]
+                val_lvl = bin_centers[lo_idx]
+                vah_lvl = bin_centers[hi_idx]
+
+                # 当前价（最后收盘）
+                current_price = float(cl.iloc[-1])
+                va_pct = va_vol / total_vol * 100
+
+                # ── 4. 绘图 ───────────────────────────────────────────────
+                BG      = "#0D1117"
+                AX_BG   = "#161B22"
+                RED     = "#EF4444"
+                GREEN   = "#22C55E"
+                YELLOW  = "#FACC15"
+                PINK    = "#EC4899"
+                GRAY    = "#6B7280"
+                WHITE   = "#F0F6FC"
+
+                fig = plt.figure(figsize=(16, 10), facecolor=BG)
+                # 左：K 线迷你图；右：Volume Profile 横柱
+                gs = fig.add_gridspec(2, 2,
+                                      width_ratios=[3, 1],
+                                      height_ratios=[3, 1],
+                                      hspace=0.04, wspace=0.02)
+                ax_price  = fig.add_subplot(gs[0, 0])  # K线
+                ax_vol    = fig.add_subplot(gs[1, 0], sharex=ax_price)  # 成交量
+                ax_vp     = fig.add_subplot(gs[:, 1])  # Volume Profile
+
+                for ax in [ax_price, ax_vol, ax_vp]:
+                    ax.set_facecolor(AX_BG)
+                    ax.tick_params(colors=GRAY, labelsize=9)
+                    for spine in ax.spines.values():
+                        spine.set_edgecolor("#30363D")
+
+                # K 线（简化为收盘价折线 + 蜡烛影线）
+                x = np.arange(len(df))
+                ax_price.set_xlim(-0.5, len(df) - 0.5)
+
+                up_mask   = cl.values >= df["Open"].astype(float).values
+                down_mask = ~up_mask
+
+                # 影线
+                ax_price.vlines(x[up_mask],   lo.values[up_mask],   hi.values[up_mask],
+                                color=GREEN, linewidth=0.8, alpha=0.8)
+                ax_price.vlines(x[down_mask], lo.values[down_mask], hi.values[down_mask],
+                                color=RED,   linewidth=0.8, alpha=0.8)
+
+                # 实体
+                body_w = 0.6
+                for i in x:
+                    o = float(df["Open"].iloc[i])
+                    c = float(cl.iloc[i])
+                    color = GREEN if c >= o else RED
+                    ax_price.bar(i, abs(c - o), bottom=min(o, c),
+                                 width=body_w, color=color, alpha=0.9)
+
+                # MA20 / MA60
+                for period, color, label in [(20, "#F59E0B", "MA20"), (60, "#8B5CF6", "MA60")]:
+                    ma = cl.rolling(period).mean()
+                    ax_price.plot(x, ma.values, color=color,
+                                  linewidth=1.2, label=label, alpha=0.9)
+
+                # 水平线：POC / VAH / VAL
+                ax_price.axhline(poc_price, color=YELLOW,   linewidth=1.2, linestyle="-",  alpha=0.9,
+                                 label=f"POC ${poc_price:.1f}")
+                ax_price.axhline(vah_lvl,   color=PINK,     linewidth=1.0, linestyle="--", alpha=0.8)
+                ax_price.axhline(val_lvl,   color=GRAY,     linewidth=1.0, linestyle="--", alpha=0.7)
+
+                # 右侧价格标签
+                ax_price.text(len(df) - 0.3, vah_lvl, f"VAH\n${vah_lvl:.1f}",
+                              color=PINK,   fontsize=7, va="center", ha="left")
+                ax_price.text(len(df) - 0.3, val_lvl, f"VAL\n${val_lvl:.1f}",
+                              color=GRAY,   fontsize=7, va="center", ha="left")
+                ax_price.text(len(df) - 0.3, poc_price, f"POC ${poc_price:.1f}",
+                              color=YELLOW, fontsize=7, va="center", ha="left")
+
+                ax_price.set_ylabel("价格 ($)", color=WHITE, fontsize=10)
+                ax_price.yaxis.label.set_color(WHITE)
+                ax_price.tick_params(axis="x", labelbottom=False)
+                ax_price.legend(loc="upper left", fontsize=8,
+                                facecolor=AX_BG, edgecolor="#30363D",
+                                labelcolor=WHITE, framealpha=0.8)
+
+                # X 轴日期刻度（间隔约 20 根）
+                step = max(1, len(df) // 8)
+                xticks = x[::step]
+                xlabels = [str(df.index[i])[:10] if i < len(df) else "" for i in xticks]
+                ax_vol.set_xticks(xticks)
+                ax_vol.set_xticklabels(xlabels, rotation=30, ha="right", fontsize=8)
+
+                # 成交量
+                vol_colors = [GREEN if c >= o else RED
+                              for c, o in zip(cl.values, df["Open"].astype(float).values)]
+                ax_vol.bar(x, vol.values, color=vol_colors, alpha=0.7, width=0.8)
+                ax_vol.set_ylabel("成交量", color=WHITE, fontsize=9)
+                ax_vol.yaxis.label.set_color(WHITE)
+
+                # Volume Profile 横柱（右侧）
+                bar_colors = []
+                for i, (bc, bv) in enumerate(zip(bin_centers, vol_profile)):
+                    if i == poc_idx:
+                        bar_colors.append(YELLOW)
+                    elif lo_idx <= i <= hi_idx:
+                        bar_colors.append(RED if bc < poc_price else "#EF444488")
+                    else:
+                        bar_colors.append(GREEN if bc > current_price else "#6B728088")
+
+                ax_vp.barh(bin_centers, vol_profile,
+                           height=(bins[1] - bins[0]) * 0.85,
+                           color=bar_colors, alpha=0.9)
+
+                # VP 水平线
+                ax_vp.axhline(poc_price,     color=YELLOW, linewidth=1.2, linestyle="-")
+                ax_vp.axhline(vah_lvl,       color=PINK,   linewidth=1.0, linestyle="--", alpha=0.8)
+                ax_vp.axhline(val_lvl,       color=GRAY,   linewidth=1.0, linestyle="--", alpha=0.7)
+                ax_vp.axhline(current_price, color=WHITE,  linewidth=0.8, linestyle=":",  alpha=0.6)
+
+                # VP 标签
+                max_vol = vol_profile.max()
+                ax_vp.text(max_vol * 1.02, poc_price, f"POC\n${poc_price:.1f}",
+                           color=YELLOW, fontsize=7, va="center")
+                ax_vp.text(max_vol * 1.02, vah_lvl, f"高\n${vah_lvl:.1f}",
+                           color=PINK,   fontsize=7, va="center")
+                ax_vp.text(max_vol * 1.02, val_lvl, f"低\n${val_lvl:.1f}",
+                           color=GRAY,   fontsize=7, va="center")
+
+                ax_vp.set_xlabel("成交量", color=WHITE, fontsize=9)
+                ax_vp.xaxis.label.set_color(WHITE)
+                ax_vp.tick_params(axis="y", labelleft=False)
+                ax_vp.yaxis.set_tick_params(labelright=True, labelsize=8)
+                ax_vp.yaxis.tick_right()
+                ax_vp.set_ylim(price_min * 0.998, price_max * 1.002)
+
+                # 标题
+                pct_from_poc = (current_price - poc_price) / poc_price * 100
+                sign = "+" if pct_from_poc >= 0 else ""
+                title = (
+                    f"NVDA  筹码分布(VPVR)  {date_str}  （近{len(df)}交易日）"
+                    .replace("NVDA", ticker)
+                )
+                fig.suptitle(title, color=WHITE, fontsize=13, fontweight="bold", y=0.98)
+
+                # 底部统计信息
+                stats = (
+                    f"POC: ${poc_price:.2f}  |  VAH: ${vah_lvl:.2f}  |  VAL: ${val_lvl:.2f}  |  "
+                    f"VA占比: {va_pct:.1f}%  |  现价距POC: {sign}{pct_from_poc:.1f}%  |  "
+                    f"现价距VAL: {(current_price - val_lvl) / val_lvl * 100:+.1f}%"
+                )
+                fig.text(0.5, 0.01, stats, ha="center", color=GRAY, fontsize=9)
+
+                # 保存
+                fname = f"{ticker}_vpvr_{date_str}.png"
+                save_path = pics_dir / fname
+                fig.savefig(str(save_path), dpi=120, bbox_inches="tight",
+                            facecolor=BG, edgecolor="none")
+                plt.close(fig)
+                files.append(str(save_path))
+                self._emit(
+                    36 + int(len(files) / len(self.tickers) * 4),
+                    f"VPVR 已保存：{fname}"
+                )
+
+            except Exception as e:
+                msg = f"{ticker} vpvr 图表生成失败：{e}"
+                logger.warning(f"[DailyExport] {msg}")
+                errors.append(msg)
 
         return files, errors
 
