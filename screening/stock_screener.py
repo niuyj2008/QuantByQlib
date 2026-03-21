@@ -105,28 +105,40 @@ class StockScreener:
     # 精选大盘股（S&P500 核心成分 + 纳斯达克100主力），
     # 在 Qlib 数据集中均有完整历史，适合 Alpha158 因子计算
     _CORE_UNIVERSE = [
+        # 科技/大市值
         "AAPL","MSFT","NVDA","AMZN","GOOGL","GOOG","META","TSLA","BRK-B","UNH",
         "JPM","V","XOM","LLY","JNJ","MA","AVGO","PG","HD","MRK","COST","ABBV",
         "CVX","KO","PEP","WMT","ACN","MCD","BAC","CRM","ORCL","ADBE","AMD","NFLX",
         "QCOM","TXN","INTU","AMGN","CSCO","NOW","INTC","IBM","GS","CAT","HON",
         "RTX","LOW","GE","SPGI","BKNG","ISRG","ELV","AXP","CB","SYK","PLD","BLK",
         "VRTX","C","DE","REGN","ADI","LRCX","KLAC","MRVL","MU","PANW","SNPS","CDNS",
-        "ANET","FTNT","CRWD","ZS","DDOG","TEAM","WDAY","VEEV","HUBS","COUP","ZM",
-        "SHOP","SQ","PYPL","COIN","HOOD","PLTR","RBLX","U","DASH","LYFT","UBER",
-        "ABNB","AIRB","BMRN","BIIB","GILD","MRNA","BNTX","PFE","AZN","LMT","NOC",
-        "GD","BA","HII","L3HARRIS","LDOS","BAH","SAIC","MANT","CACI","MAXR",
+        # 科技成长（COUP→退市/私有化2023已移除，SQ→改名XYZ但ticker仍有效保留）
+        "ANET","FTNT","CRWD","ZS","DDOG","TEAM","WDAY","VEEV","HUBS","ZM",
+        "SQ","PYPL","COIN","HOOD","PLTR","RBLX","U","DASH","LYFT","UBER",
+        # 消费/医疗/生物
+        "ABNB","BMRN","BIIB","GILD","MRNA","BNTX","PFE","AZN","LMT","NOC",
+        # 国防（L3HARRIS→正确ticker LHX，MANT/MAXR→已私有化退市已移除）
+        "GD","BA","HII","LHX","LDOS","BAH","SAIC","CACI",
+        # 金融
         "WFC","MS","USB","PNC","TFC","COF","AIG","MET","PRU","AFL","ALL","TRV",
-        "SPG","O","AMT","CCI","DLR","PSA","WELL","EQR","AVB","PLD","VTR","HR",
-        "VZ","T","TMUS","CMCSA","DIS","NFLX","PARA","WBD","FOX","NWS",
-        "XOM","CVX","COP","SLB","HAL","BKR","DVN","MPC","VLO","PSX","OXY",
+        # 房产/REIT
+        "SPG","O","AMT","CCI","DLR","PSA","WELL","EQR","AVB","VTR",
+        # 电信/传媒
+        "VZ","T","TMUS","CMCSA","DIS","PARA","WBD","FOX","NWS",
+        # 能源
+        "COP","SLB","HAL","BKR","DVN","MPC","VLO","PSX","OXY",
+        # 公用事业
         "NEE","DUK","SO","D","AEP","EXC","XEL","ED","PEG","AWK",
+        # 材料/工业
         "LIN","APD","ECL","SHW","PPG","NEM","FCX","AA","CLF","NUE","STLD",
         "UPS","FDX","DAL","UAL","AAL","LUV","CSX","NSC","UNP","WAB",
-        "CVS","WBA","MCK","CAH","ABC","HCA","THC","CNC","MOH","HUM",
-        "WMT","TGT","COST","HD","LOW","BBY","ROST","TJX","DG","DLTR",
-        "SBUX","MCD","YUM","CMG","DPZ","QSR","DKNG","PENN",
-        "BA","CAT","DE","HON","GE","MMM","EMR","ROK","PH","ETN","IR","XYL",
-        "TSCO","SYF","WEX","CSGP","COIN","FIS","FISV","GPN","MA","V","AXP",
+        # 医疗/零售（WBA→私有化进行中/仍挂牌保留，ABC→2023改名COR已更新）
+        "CVS","MCK","CAH","COR","HCA","THC","CNC","MOH","HUM",
+        "TGT","BBY","ROST","TJX","DG","DLTR",
+        "SBUX","YUM","CMG","DPZ","QSR","DKNG","PENN",
+        # 工业/金融科技
+        "MMM","EMR","ROK","PH","ETN","IR","XYL",
+        "TSCO","SYF","WEX","CSGP","FIS","FISV","GPN",
     ]
 
     def _from_qlib(self) -> list[str]:
