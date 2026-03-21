@@ -569,9 +569,10 @@ _NASDAQ100_TICKERS = [
     "KLAC", "MAR", "ABNB", "CTAS", "ORLY", "FTNT", "WDAY", "MNST", "PYPL", "ADP",
     "MRVL", "NXPI", "PAYX", "PCAR", "ODFL", "FAST", "ROST", "CPRT", "KHC", "DDOG",
     "CEG", "FANG", "ON", "IDXX", "VRSK", "EXC", "BIIB", "XEL", "CTSH", "GEHC",
-    "MRNA", "ZS", "TEAM", "ANSS", "DLTR", "CRWD", "ALGN", "ILMN", "WBA", "MDB",
-    "SIRI", "ENPH", "LCID", "RIVN", "ZM", "TTD", "CDW", "SPLK", "OKTA", "DXCM",
+    "MRNA", "ZS", "TEAM", "DLTR", "CRWD", "ALGN", "ILMN", "MDB",   # ANSS→退市(Synopsys收购2024), WBA→私有化退市2024
+    "SIRI", "ENPH", "LCID", "RIVN", "ZM", "TTD", "CDW", "OKTA", "DXCM",  # SPLK→Cisco收购退市2024
     "EBAY", "TTWO", "GFS", "NTES", "JD", "LULU", "SMCI", "DECK", "APP", "ARM",
+    "CSCO", "MSTR", "COIN", "PLTR", "HOOD",  # 补充替换退市空位
 ]
 
 _SP500_SUBSET_TICKERS = [
