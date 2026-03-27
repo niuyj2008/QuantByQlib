@@ -53,6 +53,15 @@ class PortfolioPage(QWidget):
         self._export_charts_btn.clicked.connect(self._on_export_charts)
         header_row.addWidget(self._export_charts_btn)
 
+        self._ai_analyze_btn = QPushButton("🤖 AI分析持仓")
+        self._ai_analyze_btn.setObjectName("btn_secondary")
+        self._ai_analyze_btn.setToolTip(
+            "对所有持仓股票依次运行 AI 综合分析，\n"
+            "生成个股 Markdown 报告保存到本地「AI报告目录」"
+        )
+        self._ai_analyze_btn.clicked.connect(self._on_ai_analyze_portfolio)
+        header_row.addWidget(self._ai_analyze_btn)
+
         self._daily_export_btn = QPushButton("🚀 每日数据导出")
         self._daily_export_btn.setObjectName("btn_primary")
         self._daily_export_btn.setToolTip(
@@ -615,6 +624,83 @@ class PortfolioPage(QWidget):
             f = QFont(); f.setBold(True)
             item.setFont(f)
         self._trans_table.setItem(row, col, item)
+
+    # ── 持仓 AI 批量分析 ──────────────────────────────────────
+
+    def _on_ai_analyze_portfolio(self) -> None:
+        """一键对所有持仓股票生成 AI 分析报告"""
+        if not self._positions:
+            QMessageBox.information(self, "无持仓", "当前没有持仓记录，无法进行 AI 分析。")
+            return
+
+        tickers = [p["symbol"] for p in self._positions]
+        total   = len(tickers)
+
+        progress = QProgressDialog(
+            f"准备分析 {total} 支持仓股票…", "取消", 0, total, self
+        )
+        progress.setWindowTitle("🤖 AI分析持仓")
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setMinimumWidth(420)
+        progress.setValue(0)
+
+        self._ai_analyze_btn.setEnabled(False)
+        self._ai_analyze_btn.setText("⏳ 分析中…")
+
+        from workers.portfolio_ai_worker import PortfolioAIWorker
+        worker = PortfolioAIWorker(tickers)
+
+        def _on_progress(idx: int, total_: int, ticker: str, text: str) -> None:
+            if progress.wasCanceled():
+                return
+            progress.setValue(idx - 1)
+            progress.setLabelText(f"({idx}/{total_}) {text}")
+
+        def _on_one_done(ticker: str, saved_path: str) -> None:
+            from loguru import logger
+            logger.info(f"[Portfolio AI] {ticker} 报告已保存：{saved_path}")
+
+        def _on_all_done(success: list, failed: list, reports_dir: str) -> None:
+            progress.close()
+            self._ai_analyze_btn.setEnabled(True)
+            self._ai_analyze_btn.setText("🤖 AI分析持仓")
+
+            lines = []
+            if success:
+                lines.append(f"✅ 成功 {len(success)} 支：{', '.join(success)}")
+            if failed:
+                lines.append(f"❌ 失败 {len(failed)} 支：{', '.join(failed)}")
+            if reports_dir:
+                lines.append(f"\n报告目录：\n{reports_dir}")
+
+            msg_box = QMessageBox(self)
+            msg_box.setWindowTitle("AI分析完成")
+            msg_box.setText("\n".join(lines) or "分析完成")
+            msg_box.setStandardButtons(
+                QMessageBox.StandardButton.Open | QMessageBox.StandardButton.Ok
+            )
+            msg_box.button(QMessageBox.StandardButton.Open).setText("📂 打开目录")
+            ret = msg_box.exec()
+            if ret == QMessageBox.StandardButton.Open and reports_dir:
+                import subprocess, sys
+                if sys.platform == "darwin":
+                    subprocess.Popen(["open", reports_dir])
+                elif sys.platform == "win32":
+                    subprocess.Popen(["explorer", reports_dir])
+                else:
+                    subprocess.Popen(["xdg-open", reports_dir])
+
+        def _on_error(ticker: str, err: str) -> None:
+            from loguru import logger
+            logger.warning(f"[Portfolio AI] {ticker} 错误：{err}")
+
+        worker.signals.progress.connect(_on_progress)
+        worker.signals.one_done.connect(_on_one_done)
+        worker.signals.all_done.connect(_on_all_done)
+        worker.signals.error.connect(_on_error)
+
+        QThreadPool.globalInstance().start(worker)
 
     # ── K 线图 ─────────────────────────────────────────────
 

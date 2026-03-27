@@ -72,6 +72,21 @@ def get_backtest_dir() -> Path:
     return d
 
 
+def get_reports_dir() -> Path:
+    """
+    返回 AI 分析报告根目录（默认 ~/Documents/美股交易日记/reports/）
+    可通过环境变量 REPORTS_DIR 覆盖。
+    """
+    env = os.environ.get("REPORTS_DIR", "").strip()
+    if env:
+        d = Path(env).expanduser().resolve()
+    else:
+        # 默认：~/Documents/美股交易日记/reports
+        d = Path.home() / "Documents" / "美股交易日记" / "reports"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def get_skills_dir() -> Path:
     d = get_root() / "skills"
     d.mkdir(exist_ok=True)

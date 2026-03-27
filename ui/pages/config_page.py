@@ -308,6 +308,7 @@ class ConfigPage(QWidget):
             ("信号CSV目录：",  "EXPORT_SIGNALS_DIR",   "（默认：根目录/signals）","策略选股信号 CSV 的存放目录"),
             ("HMM政体目录：",  "EXPORT_REGIME_DIR",    "（默认：根目录/regime）", "HMM 市场政体 JSON 的存放目录"),
             ("回测报告目录：", "EXPORT_BACKTEST_DIR",  "（默认：根目录/backtest）","月度回测绩效 JSON 的存放目录"),
+            ("AI报告目录：",   "REPORTS_DIR",          "~/Documents/美股交易日记/reports", "AI 分析报告和每日摘要 MD 文件的存放目录"),
         ]
 
         self._export_dir_inputs: dict[str, QLineEdit] = {}

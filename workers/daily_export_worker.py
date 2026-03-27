@@ -175,6 +175,13 @@ class DailyExportWorker(QRunnable):
                 last_available=last or "",
             )
 
+        # ── F5a：每日摘要 MD 报告 ─────────────────────────────────────────
+        try:
+            self._emit(92, "生成每日摘要 MD 报告...")
+            self._write_daily_summary_md(d, signal_files)
+        except Exception as e:
+            logger.warning(f"[DailyExport] 每日摘要 MD 生成失败：{e}")
+
         # ── F5：Manifest ──────────────────────────────────────────────────
         self._emit(95, "F5 写入 Manifest...")
         mb.write()
@@ -665,6 +672,44 @@ class DailyExportWorker(QRunnable):
         except Exception as e:
             logger.error(f"[DailyExport] HMM 政体识别失败：{e}")
             return None
+
+    def _write_daily_summary_md(self, d: date, signal_files: list[str]) -> None:
+        """读取最新信号 CSV，生成每日摘要 MD 报告"""
+        import pandas as pd
+        from services.report_writer import ReportWriter
+
+        # 尝试读取最新的信号 CSV
+        signals_df = None
+        strategy_name = ""
+        if signal_files:
+            latest_csv = signal_files[-1]
+            try:
+                signals_df = pd.read_csv(latest_csv, encoding="utf-8-sig")
+                strategy_name = Path(latest_csv).stem  # e.g. strategy2_20260318
+            except Exception as e:
+                logger.debug(f"[DailyExport] 读取信号 CSV 失败：{e}")
+
+        # 尝试读取最新的 HMM 政体信息
+        regime_info = None
+        try:
+            from services.output_paths import get_regime_dir
+            regime_dir = get_regime_dir()
+            regime_files = sorted(regime_dir.glob("hmm_regime_*.json"), reverse=True)
+            if regime_files:
+                import json
+                with open(regime_files[0], "r", encoding="utf-8") as f:
+                    regime_info = json.load(f)
+        except Exception as e:
+            logger.debug(f"[DailyExport] 读取政体文件失败：{e}")
+
+        writer = ReportWriter()
+        path = writer.save_daily_summary(
+            signals_df=signals_df,
+            regime_info=regime_info,
+            trade_date=d,
+            strategy_name=strategy_name,
+        )
+        logger.info(f"[DailyExport] 每日摘要已保存：{path}")
 
     def _run_backtest(self, d: date) -> Optional[Path]:
         try:

@@ -12,9 +12,9 @@ from typing import Optional
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QFrame, QScrollArea, QSizePolicy,
-    QProgressBar, QStackedWidget,
+    QProgressBar, QStackedWidget, QTextEdit,
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QThreadPool
+from PyQt6.QtCore import Qt, pyqtSignal, QThreadPool, QObject, pyqtSlot
 from PyQt6.QtGui import QFont
 
 from ui.theme import COLORS
@@ -95,6 +95,7 @@ class StockDetailPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._current_ticker: Optional[str] = None
+        self._last_report = None
         self._setup_ui()
 
     # ── 公开接口 ──────────────────────────────────────────────
@@ -232,6 +233,15 @@ class StockDetailPanel(QWidget):
     def _on_result(self, ticker: str, report) -> None:
         if ticker != self._current_ticker:
             return
+        self._last_report = report   # 保存供 AI 报告按钮使用
+        from loguru import logger
+        logger.info(
+            f"[DetailPanel] {ticker} 收到结果："
+            f"overall.score={report.overall.score if report.overall else 'N/A'}，"
+            f"ohlcv_score={report.overall.ohlcv_score if report.overall else 'N/A'}，"
+            f"tech_score.available={report.tech_score.available if report.tech_score else 'None'}，"
+            f"tech_score.total={report.tech_score.total_score if report.tech_score else 'None'}"
+        )
         self._render_report(report)
         self._show_content()
 
@@ -267,6 +277,11 @@ class StockDetailPanel(QWidget):
         quant_score = getattr(self, "_quant_score", None)
         if quant_score is not None:
             self._render_quant_score(quant_score)
+            self._add_separator()
+
+        # ── 六维技术评分（TechnicalScorer）──
+        if report.tech_score and report.tech_score.available:
+            self._render_tech_score(report.tech_score)
             self._add_separator()
 
         # ── Alpha158 技术信号 ──
@@ -373,9 +388,10 @@ class StockDetailPanel(QWidget):
 
         # 分维度进度
         for label, score in [
-            ("技术面", overall.tech_score),
-            ("基本面", overall.fund_score),
-            ("情绪面", overall.senti_score),
+            ("Alpha158", overall.tech_score),
+            ("六维技术", (overall.ohlcv_score / 100.0) if overall.ohlcv_score is not None else None),
+            ("基本面",   overall.fund_score),
+            ("情绪面",   overall.senti_score),
         ]:
             if score is None:
                 continue
@@ -478,6 +494,180 @@ class StockDetailPanel(QWidget):
             )
             self._content_layout.addWidget(row)
 
+    # ── 六维技术评分各维度解读 ────────────────────────────────
+
+    @staticmethod
+    def _dim_interpretation(dim_key: str, score_val: float, ts) -> str:
+        """根据分数和原始指标值生成通俗解读"""
+        if dim_key == "ma_trend":
+            if score_val >= 80:
+                return "价格强势站上所有均线，趋势明确向上"
+            elif score_val >= 65:
+                return "价格站上多条均线，中期趋势偏多"
+            elif score_val >= 50:
+                return "均线多空交织，方向尚不明朗"
+            elif score_val >= 35:
+                return "价格跌破部分均线，趋势偏弱"
+            else:
+                return "价格跌破多条均线，趋势向下"
+
+        elif dim_key == "deviation":
+            pct = getattr(ts, "deviation_pct", None)
+            pct_str = f"（偏离 MA20 {pct:+.1f}%）" if pct is not None else ""
+            if getattr(ts, "chase_warning", False):
+                return f"⚠ 偏离过大{pct_str}，高位追涨风险较高"
+            elif score_val >= 65:
+                return f"价格与均线距离适中{pct_str}，无明显追涨风险"
+            else:
+                return f"价格大幅偏离均线下方{pct_str}，超卖区域"
+
+        elif dim_key == "volume":
+            if score_val >= 75:
+                return "放量上涨，主力资金积极介入"
+            elif score_val >= 55:
+                return "量能温和配合，整体健康"
+            elif score_val >= 40:
+                return "量能一般，资金观望情绪较重"
+            else:
+                return "缩量或量价背离，信号偏弱"
+
+        elif dim_key == "macd":
+            cross = getattr(ts, "macd_cross", None)
+            if cross == "金叉":
+                return "MACD 金叉，短期动能由弱转强，看涨信号"
+            elif cross == "死叉":
+                return "MACD 死叉，短期动能走弱，注意风险"
+            else:
+                return "MACD 无明确金叉/死叉，动能方向待定"
+
+        elif dim_key == "rsi":
+            rsi = getattr(ts, "rsi6", None)
+            rsi_str = f"RSI(6)={rsi:.0f}" if rsi is not None else "RSI"
+            if rsi is not None and rsi > 80:
+                return f"{rsi_str}，严重超买，回调风险较大"
+            elif rsi is not None and rsi > 70:
+                return f"{rsi_str}，进入超买区，注意短期回调"
+            elif rsi is not None and rsi < 20:
+                return f"{rsi_str}，严重超卖，存在反弹机会"
+            elif rsi is not None and rsi < 30:
+                return f"{rsi_str}，进入超卖区，存在反弹机会"
+            else:
+                return f"{rsi_str}，处于正常区间（30-70），动能中性"
+
+        elif dim_key == "bband":
+            bp = getattr(ts, "bband_pct", None)
+            bp_str = f"%B={bp:.2f}" if bp is not None else ""
+            if bp is not None and bp > 0.85:
+                return f"价格接近布林上轨{f'（{bp_str}）' if bp_str else ''}，短期超买"
+            elif bp is not None and bp < 0.15:
+                return f"价格接近布林下轨{f'（{bp_str}）' if bp_str else ''}，超卖支撑"
+            else:
+                return f"价格在布林带中轨附近{f'（{bp_str}）' if bp_str else ''}，波动正常"
+
+        return ""
+
+    def _render_tech_score(self, ts) -> None:
+        """六维技术评分展示（TechnicalScore）"""
+        signal_type = ts.signal_type or "neutral"
+
+        title_row = QHBoxLayout()
+        title_row.addWidget(_SectionTitle("六维技术评分"))
+        score_badge = _SignalBadge(f"{ts.total_score:.0f}分  {ts.signal or ''}", signal_type)
+        title_row.addWidget(score_badge)
+        title_row.addStretch()
+        self._content_layout.addLayout(title_row)
+
+        # 追涨警告
+        if ts.chase_warning and ts.deviation_pct is not None:
+            warn = QLabel(f"⚠️ 追涨风险：价格偏离 MA20 达 {ts.deviation_pct:+.1f}%（超过 5% 阈值）")
+            warn.setStyleSheet(f"color:{COLORS['warning']}; font-size:11px; padding:2px 0;")
+            warn.setWordWrap(True)
+            self._content_layout.addWidget(warn)
+
+        # 各维度进度条 + 解读
+        dim_key_map = {
+            "MA 趋势":  "ma_trend",
+            "背离率":   "deviation",
+            "量能模式": "volume",
+            "MACD":     "macd",
+            "RSI 动量": "rsi",
+            "布林带":   "bband",
+        }
+        dims = ts.to_dimension_list() if hasattr(ts, "to_dimension_list") else []
+        for dim in dims:
+            score_val = dim["score"]
+            if score_val is None:
+                continue
+
+            # 进度条行
+            bar_row = QHBoxLayout()
+            name_lbl = QLabel(f"{dim['name']}（{dim['weight']}）")
+            name_lbl.setStyleSheet(f"color:{COLORS['text_secondary']}; font-size:11px; font-weight:bold;")
+            name_lbl.setFixedWidth(110)
+            bar_row.addWidget(name_lbl)
+
+            bar = QProgressBar()
+            bar.setRange(0, 100)
+            bar.setValue(int(score_val))
+            bar.setMaximumHeight(8)
+            bar.setTextVisible(False)
+            bar_color = (COLORS["success"] if score_val >= 65
+                         else COLORS["danger"] if score_val < 40
+                         else COLORS["warning"])
+            bar.setStyleSheet(f"""
+                QProgressBar {{background:{COLORS['bg_card']};border-radius:4px;border:none;}}
+                QProgressBar::chunk {{background:{bar_color};border-radius:4px;}}
+            """)
+            bar_row.addWidget(bar, 1)
+
+            num_lbl = QLabel(f"{score_val:.0f}")
+            num_lbl.setStyleSheet(
+                f"color:{bar_color}; font-size:11px; font-weight:bold;"
+            )
+            num_lbl.setFixedWidth(28)
+            bar_row.addWidget(num_lbl)
+            self._content_layout.addLayout(bar_row)
+
+            # 解读文字
+            dim_key = dim_key_map.get(dim["name"], "")
+            interp = self._dim_interpretation(dim_key, score_val, ts) if dim_key else ""
+            if interp:
+                interp_lbl = QLabel(interp)
+                interp_lbl.setStyleSheet(
+                    f"color:{COLORS['text_muted']}; font-size:10px; "
+                    f"padding-left:114px; padding-bottom:4px;"
+                )
+                interp_lbl.setWordWrap(True)
+                self._content_layout.addWidget(interp_lbl)
+
+        # 关键数值行
+        key_vals: list[tuple] = []
+        if ts.ma5 and ts.current_price:
+            key_vals.append(("MA5", f"${ts.ma5:.2f}",
+                             "上方" if ts.current_price > ts.ma5 else "下方",
+                             "bullish" if ts.current_price > ts.ma5 else "bearish"))
+        if ts.ma20 and ts.deviation_pct is not None:
+            key_vals.append(("MA20 背离率", f"{ts.deviation_pct:+.1f}%",
+                             "追涨警告" if ts.chase_warning else "正常",
+                             "bearish" if ts.chase_warning else "neutral"))
+        if ts.macd_cross:
+            key_vals.append(("MACD", ts.macd_cross,
+                             ts.macd_cross,
+                             "bullish" if ts.macd_cross == "金叉" else
+                             "bearish" if ts.macd_cross == "死叉" else "neutral"))
+        if ts.rsi6 is not None:
+            rsi_sig = "超买" if ts.rsi6 > 70 else "超卖" if ts.rsi6 < 30 else "中性"
+            rsi_type = "bearish" if ts.rsi6 > 70 else "bullish" if ts.rsi6 < 30 else "neutral"
+            key_vals.append(("RSI(6)", f"{ts.rsi6:.1f}", rsi_sig, rsi_type))
+        if ts.bband_pct is not None:
+            bp = ts.bband_pct
+            bb_sig = "触上轨" if bp > 0.9 else "触下轨" if bp < 0.1 else f"%B={bp:.2f}"
+            bb_type = "bearish" if bp > 0.9 else "bullish" if bp < 0.1 else "neutral"
+            key_vals.append(("布林带", bb_sig, bb_sig, bb_type))
+
+        for label, val, sig_text, sig_type in key_vals:
+            self._content_layout.addWidget(_MetricRow(label, val, sig_text, sig_type))
+
     def _render_fundamental(self, fund) -> None:
         self._content_layout.addWidget(_SectionTitle("基本面指标（FMP）"))
 
@@ -574,7 +764,75 @@ class StockDetailPanel(QWidget):
         bt_btn.clicked.connect(lambda: self.run_strategy.emit(ticker))
         btn_row.addWidget(bt_btn)
 
+        ai_btn = QPushButton("🤖 AI 分析报告")
+        ai_btn.setObjectName("btn_secondary")
+        ai_btn.setMinimumHeight(36)
+        ai_btn.clicked.connect(lambda: self._request_ai_report(ticker))
+        btn_row.addWidget(ai_btn)
+
         self._content_layout.addLayout(btn_row)
+
+        # AI 报告展示区（初始隐藏，点击按钮后展开）
+        self._ai_report_label = _SectionTitle("AI 分析报告（Claude）")
+        self._ai_report_label.hide()
+        self._content_layout.addWidget(self._ai_report_label)
+
+        self._ai_report_text = QTextEdit()
+        self._ai_report_text.setReadOnly(True)
+        self._ai_report_text.setMinimumHeight(300)
+        self._ai_report_text.setStyleSheet(f"""
+            QTextEdit {{
+                background:{COLORS.get('bg_card', '#1e1e2e')};
+                color:{COLORS.get('text_primary', '#cdd6f4')};
+                border:1px solid {COLORS.get('border', '#313244')};
+                border-radius:6px;
+                padding:10px;
+                font-size:12px;
+                font-family: 'Courier New', monospace;
+            }}
+        """)
+        self._ai_report_text.hide()
+        self._content_layout.addWidget(self._ai_report_text)
+
+    def _request_ai_report(self, ticker: str) -> None:
+        """启动后台 worker 生成 AI 分析报告（流式）"""
+        if not hasattr(self, "_last_report") or self._last_report is None:
+            return
+
+        self._ai_report_label.show()
+        self._ai_report_text.show()
+        self._ai_report_text.setPlainText("正在生成 AI 分析报告，请稍候...")
+
+        from workers.llm_report_worker import LLMReportWorker
+        worker = LLMReportWorker(self._last_report)
+        worker.signals.chunk.connect(self._on_ai_chunk)
+        worker.signals.finished.connect(self._on_ai_finished)
+        worker.signals.error.connect(self._on_ai_error)
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_ai_chunk(self, ticker: str, chunk: str) -> None:
+        """流式接收文本块"""
+        if ticker != self._current_ticker:
+            return
+        current = self._ai_report_text.toPlainText()
+        if current == "正在生成 AI 分析报告，请稍候...":
+            self._ai_report_text.setPlainText(chunk)
+        else:
+            self._ai_report_text.setPlainText(current + chunk)
+        # 滚动到底部
+        sb = self._ai_report_text.verticalScrollBar()
+        sb.setValue(sb.maximum())
+
+    def _on_ai_finished(self, ticker: str, full_text: str) -> None:
+        """报告生成完成"""
+        if ticker != self._current_ticker:
+            return
+        logger.debug(f"AI 报告生成完成：{ticker}，{len(full_text)} 字符")
+
+    def _on_ai_error(self, ticker: str, msg: str) -> None:
+        if ticker != self._current_ticker:
+            return
+        self._ai_report_text.setPlainText(f"AI 报告生成失败：{msg}")
 
     # ── 工具方法 ──────────────────────────────────────────────
 

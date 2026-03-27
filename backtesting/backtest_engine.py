@@ -520,23 +520,17 @@ class BacktestEngine:
         except Exception as e:
             logger.debug(f"yfinance 直接获取 {ticker} 失败：{e}")
 
-        # 2. OpenBB fallback
+        # 2. market_data_client 统一降级链（OpenBB → yfinance）
         try:
-            from data.openbb_client import get_price_history
-            result = get_price_history(ticker, start, end)
-            if result and result.results:
-                df = result.to_dataframe()
-                close_col = next(
-                    (c for c in df.columns if str(c).lower() in ("close", "adj_close", "adj close")),
-                    None
-                )
-                if close_col:
-                    s = df[close_col].dropna()
-                    s.index = pd.to_datetime(s.index)
-                    save_prices(key, s)
-                    return s
+            from data.market_data_client import get_ohlcv
+            df = get_ohlcv(ticker, start, end)
+            if df is not None and "close" in df.columns:
+                s = df["close"].dropna()
+                s.index = pd.to_datetime(s.index)
+                save_prices(key, s)
+                return s
         except Exception as e:
-            logger.debug(f"OpenBB 获取 {ticker} 失败：{e}")
+            logger.debug(f"market_data_client 获取 {ticker} 失败：{e}")
 
         return None
 

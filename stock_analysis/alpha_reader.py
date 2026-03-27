@@ -63,12 +63,28 @@ DISPLAY_FACTORS: dict[str, str] = {
 # 部分展示名不是合法的 Qlib 表达式，需要映射到真实表达式
 # key = DISPLAY_FACTORS 的 key，value = 传给 D.features() 的 Qlib 表达式
 _QLIB_EXPR_OVERRIDE: dict[str, str] = {
+    # MA*：价格/N日均价（>1表示价格在均线上方）
+    "MA5":    "$close/Mean($close,5)",
+    "MA10":   "$close/Mean($close,10)",
+    "MA20":   "$close/Mean($close,20)",
+    "MA30":   "$close/Mean($close,30)",
+    # RESI*：N日动量（收益率）
+    "RESI5":  "$close/Ref($close,5)-1",
+    "RESI10": "$close/Ref($close,10)-1",
+    "RESI20": "$close/Ref($close,20)-1",
+    # WVMA*：量价相关性（量价同步程度）
+    "WVMA5":  "Corr($close,$volume,5)",
+    "WVMA20": "Corr($close,$volume,20)",
+    # RVOL*：相对波动率（标准差/均值）
+    "RVOL5":  "Std($close,5)/Mean($close,5)",
+    "RVOL20": "Std($close,20)/Mean($close,20)",
+    # 其他
     "BETA5":  "BETA(5)",
     "TURN5":  "TURN(5)",
     "TURN20": "TURN(20)",
     "MACD":   "EMA($close,12)-EMA($close,26)",
-    "KDJ_K":  "SLOPE($close,9)",   # 近似：用 9日斜率代替 KDJ-K
-    "KDJ_D":  "SLOPE($close,3)",   # 近似：用 3日斜率代替 KDJ-D
+    "KDJ_K":  "SLOPE($close,9)",
+    "KDJ_D":  "SLOPE($close,3)",
     "RSI":    "RSI($close,14)",
 }
 

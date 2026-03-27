@@ -15,6 +15,7 @@ from stock_analysis.alpha_reader import Alpha158Reader, TechnicalSignal  # noqa:
 from stock_analysis.price_chart import PriceChart, ChartData
 from stock_analysis.fundamental import FundamentalAnalyzer, FundamentalData
 from stock_analysis.sentiment import SentimentAnalyzer, SentimentData
+from stock_analysis.technical_scorer import TechnicalScorer, TechnicalScore  # noqa: F401
 
 
 @dataclass
@@ -23,7 +24,8 @@ class OverallScore:
     score:          Optional[float]  = None   # 0-100，None = 数据不足
     grade:          Optional[str]    = None   # "强势买入" / "买入" / "持有" / "观望" / "卖出"
     grade_type:     Optional[str]    = None   # "bullish" / "neutral" / "bearish"
-    tech_score:     Optional[float]  = None   # 技术面分数 0-1
+    tech_score:     Optional[float]  = None   # Alpha158 技术面分数 0-1
+    ohlcv_score:    Optional[float]  = None   # 六维技术评分 0-100
     fund_score:     Optional[float]  = None   # 基本面分数 0-1
     senti_score:    Optional[float]  = None   # 情绪分数 0-1（归一化）
     available:      bool             = False
@@ -32,12 +34,13 @@ class OverallScore:
 @dataclass
 class StockReport:
     """个股综合分析报告"""
-    ticker:     str
-    technical:  Optional[TechnicalSignal]
-    chart:      Optional[ChartData]
-    fundamental:Optional[FundamentalData]
-    sentiment:  Optional[SentimentData]
-    overall:    OverallScore
+    ticker:      str
+    technical:   Optional[TechnicalSignal]
+    chart:       Optional[ChartData]
+    fundamental: Optional[FundamentalData]
+    sentiment:   Optional[SentimentData]
+    tech_score:  Optional[TechnicalScore]     # 六维技术评分（新增）
+    overall:     OverallScore
 
     @property
     def current_price(self) -> Optional[float]:
@@ -59,28 +62,30 @@ class StockReport:
 
 
 class StockAnalyzer:
-    """个股综合分析器：并行获取四个数据维度"""
+    """个股综合分析器：并行获取五个数据维度"""
 
     def __init__(self):
-        self._alpha_reader  = Alpha158Reader()
-        self._price_chart   = PriceChart()
-        self._fundamental   = FundamentalAnalyzer()
-        self._sentiment     = SentimentAnalyzer()
+        self._alpha_reader    = Alpha158Reader()
+        self._price_chart     = PriceChart()
+        self._fundamental     = FundamentalAnalyzer()
+        self._sentiment       = SentimentAnalyzer()
+        self._tech_scorer     = TechnicalScorer()
 
     def analyze(self, ticker: str,
                 use_deep_sentiment: bool = False,
                 price_period_days: int = 365) -> StockReport:
         """
-        并行获取四个维度数据，任一失败不影响其他维度
+        并行获取五个维度数据，任一失败不影响其他维度
         返回 StockReport，overall.available=False 表示数据严重不足
         """
         ticker = ticker.upper().strip()
-        logger.info(f"开始分析 {ticker}（并行四维度）")
+        logger.info(f"开始分析 {ticker}（并行五维度）")
 
-        tech_result  = None
-        chart_result = None
-        fund_result  = None
-        senti_result = None
+        tech_result   = None
+        chart_result  = None
+        fund_result   = None
+        senti_result  = None
+        score_result  = None
 
         tasks = {
             "technical":   lambda: self._alpha_reader.get_technical_signal(ticker),  # type: ignore[attr-defined]
@@ -113,11 +118,19 @@ class StockAnalyzer:
         ):
             tech_result = self._tech_from_chart(ticker, chart_result)
 
-        overall = self._calc_overall_score(tech_result, fund_result, senti_result)
+        # 六维技术评分（基于 K线 OHLCV，独立于 Alpha158）
+        if chart_result is not None and chart_result.available and not chart_result.ohlcv.empty:
+            try:
+                score_result = self._tech_scorer.score(ticker, chart_result.ohlcv)
+            except Exception as e:
+                logger.warning(f"六维技术评分失败 {ticker}：{e}")
+
+        overall = self._calc_overall_score(tech_result, fund_result, senti_result, score_result)
 
         logger.info(
             f"{ticker} 分析完成：综合评分={overall.score}，"
             f"技术={'✓' if tech_result else '✗'}，"
+            f"六维={score_result.total_score if score_result and score_result.available else '✗'}，"
             f"K线={'✓' if chart_result and chart_result.available else '✗'}，"
             f"基本面={'✓' if fund_result else '✗'}，"
             f"情绪={'✓' if senti_result and senti_result.available else '✗'}"
@@ -129,6 +142,7 @@ class StockAnalyzer:
             chart=chart_result,
             fundamental=fund_result,
             sentiment=senti_result,
+            tech_score=score_result,
             overall=overall,
         )
 
@@ -136,21 +150,33 @@ class StockAnalyzer:
 
     def _calc_overall_score(
         self,
-        tech:  Optional[TechnicalSignal],
-        fund:  Optional[FundamentalData],
-        senti: Optional[SentimentData],
+        tech:       Optional[TechnicalSignal],
+        fund:       Optional[FundamentalData],
+        senti:      Optional[SentimentData],
+        ohlcv_score: Optional[TechnicalScore] = None,
     ) -> OverallScore:
         """
         综合评分（0-100）：
-          技术信号权重 40%（来自 Alpha158）
-          基本面权重   40%（PE/成长/质量）
-          情绪权重     20%（VADER/DistilBERT）
+          Alpha158 技术信号  25%
+          六维 OHLCV 技术评分 25%（新增，来自 TechnicalScorer）
+          基本面             35%（PE/成长/质量）
+          情绪               15%（VADER/DistilBERT）
         任何维度为 None 时，其权重分配给其他维度
         全部为 None 时返回 available=False
         """
-        weights: dict[str, float] = {"tech": 0.40, "fund": 0.40, "senti": 0.20}
+        ohlcv_s = (ohlcv_score.total_score / 100.0
+                   if ohlcv_score and ohlcv_score.available and ohlcv_score.total_score is not None
+                   else None)
+
+        weights: dict[str, float] = {
+            "tech":  0.25,
+            "ohlcv": 0.25,
+            "fund":  0.35,
+            "senti": 0.15,
+        }
         scores: dict[str, Optional[float]] = {
             "tech":  self._tech_to_score(tech),
+            "ohlcv": ohlcv_s,
             "fund":  self._fund_to_score(fund),
             "senti": self._senti_to_score(senti),
         }
@@ -185,6 +211,7 @@ class StockAnalyzer:
             grade=grade,
             grade_type=gtype,
             tech_score=scores["tech"],
+            ohlcv_score=ohlcv_score.total_score if ohlcv_score and ohlcv_score.available else None,
             fund_score=scores["fund"],
             senti_score=scores["senti"],
             available=True,

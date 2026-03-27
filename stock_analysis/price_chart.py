@@ -1,6 +1,6 @@
 """
 K 线图数据提供者
-通过 OpenBB Platform 获取历史 OHLCV（alpha_vantage → yfinance 优先级）
+通过 market_data_client 获取历史 OHLCV（降级链：OpenBB → yfinance 直接调用）
 本地计算 ATR（止损参考）和 OBV（量价背离）
 """
 from __future__ import annotations
@@ -38,8 +38,6 @@ class PriceChart:
     优先 alpha_vantage（更稳定），失败时降级到 yfinance
     ATR 和 OBV 在本地计算（Alpha158 未包含这两个指标）
     """
-
-    PROVIDER_PRIORITY = ["alpha_vantage", "yfinance"]
 
     def get_chart_data(self, ticker: str, period_days: int = 365) -> ChartData:
         """
@@ -108,68 +106,14 @@ class PriceChart:
     # ── 私有方法 ──────────────────────────────────────────────
 
     def _fetch_ohlcv(self, ticker: str, period_days: int) -> Optional[pd.DataFrame]:
-        """多源故障转移，任一成功即返回；最终 fallback 直接用 yfinance"""
-        start = (date.today() - timedelta(days=period_days + 30)).isoformat()  # 多取一个月
-        end   = date.today().isoformat()
-
-        # 1. 先尝试 OpenBB（alpha_vantage 需要 API Key，跳过；只试有 Key 的 provider）
-        for provider in self.PROVIDER_PRIORITY:
-            try:
-                from openbb import obb
-                result = obb.equity.price.historical(
-                    symbol=ticker,
-                    start_date=start,
-                    end_date=end,
-                    provider=provider,
-                )
-                if result and result.results:
-                    df = result.to_dataframe()
-                    if not df.empty:
-                        logger.debug(f"K线：{ticker} via {provider}，{len(df)} 条")
-                        return df
-            except Exception as e:
-                logger.debug(f"K线获取失败 {ticker} [{provider}]：{e}")
-                continue
-
-        # 2. 最终 fallback：直接调用 yfinance（不经过 OpenBB，绕过 curl_cffi 问题）
-        try:
-            import yfinance as yf
-            period_str = "2y" if period_days > 365 else "1y"
-            df = yf.download(ticker, period=period_str, progress=False, auto_adjust=True)
-            if df is not None and not df.empty:
-                # yfinance 返回 MultiIndex 列时展平
-                if isinstance(df.columns, pd.MultiIndex):
-                    df.columns = [col[0].lower() for col in df.columns]
-                else:
-                    df.columns = [c.lower() for c in df.columns]
-                logger.debug(f"K线：{ticker} via yfinance(直接)，{len(df)} 条")
-                return df
-        except Exception as e:
-            logger.debug(f"K线 yfinance 直接调用失败 {ticker}：{e}")
-
-        return None
+        """委托给统一数据访问层（OpenBB → yfinance 降级链）"""
+        from data.market_data_client import get_ohlcv_period
+        return get_ohlcv_period(ticker, period_days)
 
     def _normalize_columns(self, df: pd.DataFrame) -> pd.DataFrame:
-        """统一列名为小写：open/high/low/close/volume"""
-        rename_map: dict[str, str] = {}
-        for col in df.columns:
-            col_lower = col.lower()
-            if col_lower in ("open", "high", "low", "close", "volume",
-                             "adj_close", "adj close"):
-                rename_map[col] = col_lower.replace(" ", "_")
-        if rename_map:
-            df = df.rename(columns=rename_map)
-
-        # 确保 index 为 datetime
-        if not isinstance(df.index, pd.DatetimeIndex):
-            for col in ("date", "Date", "timestamp", "Timestamp"):
-                if col in df.columns:
-                    df = df.set_index(col)
-                    df.index = pd.to_datetime(df.index)
-                    break
-
-        df = df.sort_index()
-        return df
+        """统一列名为小写：open/high/low/close/volume（market_data_client 已处理，保留作保障）"""
+        from data.market_data_client import _normalize_columns
+        return _normalize_columns(df)
 
     def _calc_atr(self, df: pd.DataFrame, period: int = 14) -> Optional[float]:
         """计算 ATR（平均真实波幅）"""

@@ -118,8 +118,71 @@ class FundamentalAnalyzer:
         if data.pe_ratio is None and data.market_cap is None:
             self._fill_from_yfinance(ticker, data)
 
+        self._sanitize(data, ticker)
         logger.debug(f"基本面分析完成：{ticker} — PE={data.pe_ratio} 市值={data.market_cap}")
         return data
+
+    # ── 数据清洗 ──────────────────────────────────────────────
+
+    @staticmethod
+    def _sanitize(data: "FundamentalData", ticker: str) -> None:
+        """
+        修正/过滤基本面指标的单位和合理性：
+        - FMP API 部分字段以百分比数值（如 43.25）而非小数（0.4325）返回
+          → 若值在 1~500 之间自动除以 100 换算
+        - 仍超出合理范围则丢弃，避免向 LLM 传递错误数据
+        """
+        # 利润率类：期望小数（-1 ~ 1）；FMP 可能返回百分比（1 ~ 100）
+        for attr in ("roe", "roa", "gross_margin", "operating_margin", "net_margin"):
+            val = getattr(data, attr, None)
+            if val is None:
+                continue
+            if 1.0 < abs(val) <= 500.0:
+                # 疑似百分比格式，自动换算
+                converted = val / 100.0
+                logger.debug(
+                    f"[Fundamental] {ticker}.{attr} 单位换算：{val:.2f} → {converted:.4f}"
+                    f"（FMP 返回百分比格式）"
+                )
+                setattr(data, attr, converted)
+                val = converted
+            if abs(val) > 5.0:
+                # 换算后仍超出 ±500%，视为数据错误
+                logger.warning(
+                    f"[Fundamental] {ticker}.{attr}={val*100:.0f}% 超出合理范围（±500%），已丢弃"
+                )
+                setattr(data, attr, None)
+
+        # PE/PB/PS：合法范围（负 PE 表示亏损）
+        for attr, lo, hi in [
+            ("pe_ratio", -1000, 1000),
+            ("pb_ratio", 0, 200),
+            ("ps_ratio", 0, 200),
+        ]:
+            val = getattr(data, attr, None)
+            if val is not None and not (lo <= val <= hi):
+                logger.warning(
+                    f"[Fundamental] {ticker}.{attr}={val:.1f} 超出合理范围，已丢弃"
+                )
+                setattr(data, attr, None)
+
+        # 增长率：期望小数（-1 ~ 5）；FMP 可能返回百分比
+        for attr in ("revenue_growth", "eps_growth"):
+            val = getattr(data, attr, None)
+            if val is None:
+                continue
+            if 1.0 < abs(val) <= 1000.0:
+                converted = val / 100.0
+                logger.debug(
+                    f"[Fundamental] {ticker}.{attr} 单位换算：{val:.2f} → {converted:.4f}"
+                )
+                setattr(data, attr, converted)
+                val = converted
+            if abs(val) > 10.0:
+                logger.warning(
+                    f"[Fundamental] {ticker}.{attr}={val*100:.0f}% 超出合理范围，已丢弃"
+                )
+                setattr(data, attr, None)
 
     def _fill_from_yfinance(self, ticker: str, data: FundamentalData) -> None:
         """用 yfinance .info 填充基本面（免费，无需 API Key）"""

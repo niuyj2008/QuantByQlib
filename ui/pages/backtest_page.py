@@ -12,6 +12,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QComboBox, QDateEdit, QGridLayout,
     QFrame, QProgressBar, QDoubleSpinBox, QMessageBox,
+    QSpinBox, QTableWidget, QTableWidgetItem, QHeaderView,
 )
 from PyQt6.QtCore import Qt, QDate, QThreadPool
 from PyQt6.QtGui import QFont
@@ -234,6 +235,65 @@ class BacktestPage(QWidget):
         self._placeholder.setWordWrap(True)
         layout.addWidget(self._placeholder, stretch=1)
 
+        # ── 信号胜率验证区 ──────────────────────────────────────
+        validate_frame = QFrame()
+        validate_frame.setObjectName("card")
+        vl = QVBoxLayout(validate_frame)
+        vl.setSpacing(10)
+
+        vh_row = QHBoxLayout()
+        vt = QLabel("📊 历史信号胜率验证")
+        vt.setStyleSheet(f"color:{COLORS['text_primary']}; font-size:13px; font-weight:bold;")
+        vh_row.addWidget(vt)
+        vh_row.addStretch()
+
+        vh_row.addWidget(QLabel("回看天数："))
+        self._validate_days = QSpinBox()
+        self._validate_days.setRange(7, 365)
+        self._validate_days.setValue(60)
+        self._validate_days.setSuffix(" 天")
+        self._validate_days.setFixedWidth(90)
+        vh_row.addWidget(self._validate_days)
+
+        self._validate_btn = QPushButton("▶ 运行验证")
+        self._validate_btn.setObjectName("btn_secondary")
+        self._validate_btn.setMinimumHeight(34)
+        self._validate_btn.clicked.connect(self._on_validate)
+        vh_row.addWidget(self._validate_btn)
+        vl.addLayout(vh_row)
+
+        vdesc = QLabel("评估过去 N 天导出的买入信号实际准确率（需积累历史信号文件）")
+        vdesc.setStyleSheet(f"color:{COLORS['text_muted']}; font-size:11px;")
+        vl.addWidget(vdesc)
+
+        self._validate_progress = QProgressBar()
+        self._validate_progress.setRange(0, 100)
+        self._validate_progress.setVisible(False)
+        self._validate_progress.setMaximumHeight(6)
+        vl.addWidget(self._validate_progress)
+
+        self._validate_summary = QLabel("")
+        self._validate_summary.setStyleSheet(f"color:{COLORS['text_secondary']}; font-size:12px;")
+        self._validate_summary.setWordWrap(True)
+        self._validate_summary.hide()
+        vl.addWidget(self._validate_summary)
+
+        # 结果表格
+        self._validate_table = QTableWidget(0, 7)
+        self._validate_table.setHorizontalHeaderLabels(
+            ["股票", "信号日期", "策略", "T+5收益%", "T+20收益%", "T+5胜", "T+20胜"]
+        )
+        self._validate_table.setMaximumHeight(220)
+        self._validate_table.setVisible(False)
+        self._validate_table.verticalHeader().setVisible(False)
+        self._validate_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._validate_table.setAlternatingRowColors(True)
+        hdr = self._validate_table.horizontalHeader()
+        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        vl.addWidget(self._validate_table)
+
+        layout.addWidget(validate_frame)
+
     def _connect_events(self) -> None:
         from core.event_bus import get_event_bus
         bus = get_event_bus()
@@ -374,6 +434,90 @@ class BacktestPage(QWidget):
             f"净值曲线：{strat_name}  "
             f"{report.config.start_date} → {report.config.end_date}"
         )
+
+    def _on_validate(self) -> None:
+        """运行信号胜率验证"""
+        self._validate_btn.setEnabled(False)
+        self._validate_progress.setVisible(True)
+        self._validate_progress.setValue(0)
+        self._validate_summary.hide()
+        self._validate_table.setVisible(False)
+
+        from workers.signal_validate_worker import SignalValidateWorker
+        worker = SignalValidateWorker(lookback_days=self._validate_days.value())
+        worker.signals.progress.connect(self._on_validate_progress)
+        worker.signals.result.connect(self._on_validate_result)
+        worker.signals.error.connect(self._on_validate_error)
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_validate_progress(self, pct: int, msg: str) -> None:
+        self._validate_progress.setValue(pct)
+        self._validate_summary.setText(msg)
+        self._validate_summary.show()
+
+    def _on_validate_result(self, result) -> None:
+        self._validate_btn.setEnabled(True)
+        self._validate_progress.setVisible(False)
+
+        if result.total_signals == 0:
+            self._validate_summary.setText(
+                "⚠️ 未找到历史信号文件。请先运行选股并导出信号，积累数据后再验证。"
+            )
+            self._validate_summary.show()
+            return
+
+        lines = [f"共 {result.total_signals} 条买入信号，已验证 {result.validated} 条"]
+        if result.win_rate_t5 is not None:
+            lines.append(
+                f"T+5  胜率 {result.win_rate_t5*100:.1f}%  均收 {result.avg_ret_t5*100:+.2f}%"
+                f"  最大盈 {result.max_gain_t5*100:+.1f}%  最大亏 {result.max_loss_t5*100:+.1f}%"
+            )
+        if result.win_rate_t20 is not None:
+            lines.append(
+                f"T+20 胜率 {result.win_rate_t20*100:.1f}%  均收 {result.avg_ret_t20*100:+.2f}%"
+                f"  最大盈 {result.max_gain_t20*100:+.1f}%  最大亏 {result.max_loss_t20*100:+.1f}%"
+            )
+        self._validate_summary.setText("\n".join(lines))
+        self._validate_summary.show()
+
+        # 填充表格
+        records = result.records[:100]  # 最多显示 100 行
+        self._validate_table.setRowCount(len(records))
+        for row, rec in enumerate(records):
+            def _cell(val, fmt=""):
+                item = QTableWidgetItem(fmt.format(val) if val is not None else "--")
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                return item
+
+            self._validate_table.setItem(row, 0, _cell(rec.ticker))
+            self._validate_table.setItem(row, 1, _cell(str(rec.signal_date)))
+            self._validate_table.setItem(row, 2, _cell(rec.strategy))
+
+            for col, ret_val in [(3, rec.ret_t5), (4, rec.ret_t20)]:
+                if ret_val is not None:
+                    item = QTableWidgetItem(f"{ret_val*100:+.2f}%")
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                    color = COLORS["success"] if ret_val > 0 else COLORS["danger"]
+                    item.setForeground(__import__("PyQt6.QtGui", fromlist=["QColor"]).QColor(color))
+                    self._validate_table.setItem(row, col, item)
+                else:
+                    self._validate_table.setItem(row, col, _cell(None))
+
+            for col, win_val in [(5, rec.win_t5), (6, rec.win_t20)]:
+                if win_val is not None:
+                    item = QTableWidgetItem("✅" if win_val else "❌")
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                    self._validate_table.setItem(row, col, item)
+                else:
+                    self._validate_table.setItem(row, col, _cell(None))
+
+        self._validate_table.setVisible(True)
+
+    def _on_validate_error(self, msg: str) -> None:
+        self._validate_btn.setEnabled(True)
+        self._validate_progress.setVisible(False)
+        self._validate_summary.setText(f"❌ 验证失败：{msg}")
+        self._validate_summary.show()
 
     def _lbl(self, text: str) -> QLabel:
         lbl = QLabel(text)

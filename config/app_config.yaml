@@ -35,6 +35,14 @@ analysis:
   max_news: 20
   sentiment_deep_model: false   # 默认使用 VADER，True 则使用 DistilBERT
 
+# LLM 报告生成（AI 分析报告）
+llm:
+  provider: "anthropic"            # 当前仅支持 anthropic（ANTHROPIC_API_KEY）
+  model: "claude-opus-4-6"         # 可选：claude-haiku-4-5-20251001（更快更省）
+  max_tokens: 1500                 # 报告最大 token 数
+  report_save: true                # 是否自动保存报告为 MD 文件
+  reports_dir: ""                  # 留空则使用 REPORTS_DIR 环境变量或默认路径
+
 # OpenBB 数据源优先级
 openbb:
   price_providers: ["alpha_vantage", "yfinance"]

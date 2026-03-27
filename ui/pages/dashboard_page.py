@@ -119,6 +119,7 @@ class DashboardPage(QWidget):
         # 启动后延迟加载（等待持仓 DB 就绪）
         QTimer.singleShot(800, self._refresh_portfolio)
         QTimer.singleShot(900, self._refresh_goals)
+        QTimer.singleShot(1500, self._refresh_data_sources)
 
     # ── UI 构建 ──────────────────────────────────────────────
 
@@ -166,6 +167,23 @@ class DashboardPage(QWidget):
             kpi_row.addWidget(card, stretch=1)
 
         layout.addLayout(kpi_row)
+
+        # ── 数据源健康状态行 ──
+        self._datasrc_row = QHBoxLayout()
+        self._datasrc_row.setSpacing(16)
+        self._datasrc_lbl = QLabel("数据源：")
+        self._datasrc_lbl.setStyleSheet(
+            f"color:{COLORS['text_muted']}; font-size:11px;"
+        )
+        self._datasrc_row.addWidget(self._datasrc_lbl)
+        self._datasrc_indicators: dict[str, QLabel] = {}
+        for src in ["openbb", "yfinance"]:
+            dot = QLabel(f"⚪ {src}")
+            dot.setStyleSheet(f"color:{COLORS['text_muted']}; font-size:11px;")
+            self._datasrc_indicators[src] = dot
+            self._datasrc_row.addWidget(dot)
+        self._datasrc_row.addStretch()
+        layout.addLayout(self._datasrc_row)
 
         # ── 下方双栏：信号 + 持仓 ──
         bottom = QHBoxLayout()
@@ -392,6 +410,27 @@ class DashboardPage(QWidget):
             )
             self._goal_frame.show()
 
+        except Exception:
+            pass
+
+    def _refresh_data_sources(self) -> None:
+        """检测数据源健康状态，更新状态行指示灯"""
+        try:
+            from data.market_data_client import check_data_sources
+            statuses = check_data_sources()
+            labels = {
+                "openbb":   "OpenBB",
+                "yfinance": "yfinance",
+            }
+            for key, display in labels.items():
+                dot = self._datasrc_indicators.get(key)
+                if dot is None:
+                    continue
+                ok = statuses.get(key, False)
+                icon  = "🟢" if ok else "🔴"
+                color = COLORS["success"] if ok else COLORS["danger"]
+                dot.setText(f"{icon} {display}")
+                dot.setStyleSheet(f"color:{color}; font-size:11px;")
         except Exception:
             pass
 

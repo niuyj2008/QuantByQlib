@@ -780,22 +780,16 @@ class MarketAdaptiveStrategy(BaseStrategy):
     def _detect_regime(self) -> str:
         """用市场宽度简单近似政体检测"""
         try:
-            from data.openbb_client import get_price_history
-            spy = get_price_history(
+            from data.market_data_client import get_ohlcv
+            df = get_ohlcv(
                 "SPY",
                 (date.today() - timedelta(days=60)).isoformat(),
                 date.today().isoformat(),
             )
-            if spy is not None:
-                df = spy.to_dataframe()
-                if not df.empty:
-                    close_col = next(
-                        (c for c in df.columns if c.lower() == "close"), None
-                    )
-                    if close_col:
-                        latest = float(df[close_col].iloc[-1])
-                        prev   = float(df[close_col].iloc[0])
-                        return "bull" if latest > prev else "bear"
+            if df is not None and "close" in df.columns and not df.empty:
+                latest = float(df["close"].iloc[-1])
+                prev   = float(df["close"].iloc[0])
+                return "bull" if latest > prev else "bear"
         except Exception:
             pass
         return "neutral"
