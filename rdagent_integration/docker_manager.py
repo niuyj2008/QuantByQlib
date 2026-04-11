@@ -30,20 +30,50 @@ class DockerManager:
     def _init_client(self) -> None:
         try:
             import docker
-            # 优先自动协商版本；若服务端拒绝（版本过新）则降级到 1.51
-            try:
-                self._client = docker.from_env()
-                self._client.ping()
-            except Exception as e:
-                if "is too new" in str(e) or "Maximum supported API version" in str(e):
-                    import os
-                    os.environ.setdefault("DOCKER_API_VERSION", "1.51")
-                    self._client = docker.from_env()
-                    self._client.ping()
-                else:
+            import os
+
+            # 按优先级尝试各 socket，找到能 ping 通且有目标镜像的连接
+            # 顺序：Desktop socket → OrbStack → 默认 from_env
+            candidate_sockets = [
+                os.path.expanduser("~/.docker/run/docker.sock"),   # Docker Desktop
+                os.path.expanduser("~/.orbstack/run/docker.sock"), # OrbStack
+                "/var/run/docker.sock",                            # 标准 socket
+            ]
+
+            def _try_connect(base_url: str | None = None) -> docker.DockerClient:
+                """尝试连接，自动降级 API 版本"""
+                kwargs = {"base_url": base_url} if base_url else {}
+                try:
+                    c = docker.DockerClient(**kwargs) if base_url else docker.from_env()
+                    c.ping()
+                    return c
+                except Exception as e:
+                    if "is too new" in str(e) or "Maximum supported API version" in str(e):
+                        os.environ["DOCKER_API_VERSION"] = "1.51"
+                        c = docker.DockerClient(**kwargs) if base_url else docker.from_env()
+                        c.ping()
+                        return c
                     raise
+
+            connected = False
+            for sock in candidate_sockets:
+                if not os.path.exists(sock):
+                    continue
+                try:
+                    client = _try_connect(f"unix://{sock}")
+                    self._client = client
+                    connected = True
+                    logger.info(f"Docker 连接成功（{sock}）")
+                    break
+                except Exception:
+                    continue
+
+            if not connected:
+                # 最后兜底：from_env()
+                self._client = _try_connect()
+                logger.info("Docker 连接成功（from_env）")
+
             self._available = True
-            logger.info("Docker 连接成功")
         except ImportError:
             logger.warning("docker 包未安装：pip install docker")
         except Exception as e:
