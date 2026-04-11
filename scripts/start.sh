@@ -8,11 +8,19 @@ set -e
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 
-# Python 解释器：优先用 venv，否则用系统 python3
+# Python 解释器：按优先级查找装有依赖的环境
+# 1. 项目 venv
+# 2. 系统 Python 3.9（/usr/bin/python3，依赖已安装于此）
+# 3. Homebrew python3.9
+# 4. 兜底：系统 python3
 if [ -f "$ROOT_DIR/.venv/bin/python" ]; then
     PYTHON="$ROOT_DIR/.venv/bin/python"
 elif [ -f "$ROOT_DIR/venv/bin/python" ]; then
     PYTHON="$ROOT_DIR/venv/bin/python"
+elif [ -f "/usr/bin/python3" ] && /usr/bin/python3 -c "import loguru" 2>/dev/null; then
+    PYTHON="/usr/bin/python3"
+elif command -v python3.9 &>/dev/null; then
+    PYTHON="$(command -v python3.9)"
 else
     PYTHON="$(which python3)"
 fi
