@@ -30,8 +30,18 @@ class DockerManager:
     def _init_client(self) -> None:
         try:
             import docker
-            self._client = docker.from_env()
-            self._client.ping()
+            # 优先自动协商版本；若服务端拒绝（版本过新）则降级到 1.51
+            try:
+                self._client = docker.from_env()
+                self._client.ping()
+            except Exception as e:
+                if "is too new" in str(e) or "Maximum supported API version" in str(e):
+                    import os
+                    os.environ.setdefault("DOCKER_API_VERSION", "1.51")
+                    self._client = docker.from_env()
+                    self._client.ping()
+                else:
+                    raise
             self._available = True
             logger.info("Docker 连接成功")
         except ImportError:
